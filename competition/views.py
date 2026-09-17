@@ -15,6 +15,13 @@ from django.db import transaction
 from django.db.models import F, Prefetch, Window
 from django.db.models.functions import Rank
 from django.utils import timezone
+from drf_spectacular.utils import (
+    OpenApiExample,
+    OpenApiParameter,
+    OpenApiResponse,
+    extend_schema,
+    extend_schema_view,
+)
 from rest_framework import mixins, status as http_status, viewsets
 from rest_framework.authtoken.models import Token
 from rest_framework.decorators import action
@@ -23,10 +30,17 @@ from rest_framework.generics import GenericAPIView
 from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.response import Response
 
-from .constants import PARTICIPANT_WRITABLE_MISSION_FIELDS, Status
+from .constants import (
+    DIFFICULTY_CHOICES,
+    PARTICIPANT_WRITABLE_MISSION_FIELDS,
+    STATUS_CHOICES,
+    Status,
+)
 from .filters import MissionFilter
 from .models import Hostel, Mission, Participant
 from .permissions import (
+    NOT_A_PARTICIPANT,
+    NOT_THE_CLAIMANT,
     IsMissionClaimant,
     IsOwnerOrStaff,
     IsParticipant,
@@ -36,11 +50,14 @@ from .permissions import (
     get_participant,
 )
 from .serializers import (
+    CodedErrorSerializer,
+    ErrorSerializer,
     HostelDetailSerializer,
     HostelListSerializer,
     LeaderboardSerializer,
     MissionSerializer,
     MissionStatusSerializer,
+    ParticipantMiniSerializer,
     ParticipantSerializer,
     RegisterResponseSerializer,
     RegisterSerializer,
@@ -92,6 +109,65 @@ class InvalidTransition(_CodedError):
 class CrackedIsFinal(InvalidTransition):
     code_value = "cracked_is_final"
     default_detail = "Cracked missions are final."
+
+
+# ---------------------------------------------------------------------------
+# Documented error responses
+# ---------------------------------------------------------------------------
+# Defined once and shared, so the schema and the code cannot disagree about which
+# status codes an operation can return.
+
+
+def _coded(description, detail, code):
+    return OpenApiResponse(
+        response=CodedErrorSerializer,
+        description=description,
+        examples=[
+            OpenApiExample(code, value={"detail": detail, "code": code}, response_only=True)
+        ],
+    )
+
+
+def _plain(description, detail):
+    return OpenApiResponse(
+        response=ErrorSerializer,
+        description=description,
+        examples=[
+            OpenApiExample("detail", value={"detail": detail}, response_only=True)
+        ],
+    )
+
+
+RESPONSE_EXPIRED = _coded(
+    "The mission's deadline has passed. Expiry is computed from the deadline, so this "
+    "happens even when the stored status still reads 'unclaimed'.",
+    "Mission has expired.",
+    "mission_expired",
+)
+RESPONSE_UNAVAILABLE = _coded(
+    "The mission is already in progress or cracked, so it cannot be claimed.",
+    "Mission is not available to claim.",
+    "mission_unavailable",
+)
+RESPONSE_CRACKED_FINAL = _coded(
+    "The mission is already cracked. Cracked is terminal.",
+    "Cracked missions are final.",
+    "cracked_is_final",
+)
+RESPONSE_NOT_CLAIMANT = _plain(
+    "You are not this mission's claimant, or you sent a field other than 'status'.",
+    NOT_THE_CLAIMANT,
+)
+RESPONSE_NOT_PARTICIPANT = _plain(
+    "You are authenticated but have no participant profile.",
+    NOT_A_PARTICIPANT,
+)
+RESPONSE_NOT_FOUND = _plain("No mission with that id.", "Not found.")
+RESPONSE_THROTTLED = _plain(
+    "Claim rate limit exceeded: 5 claim attempts per minute per user, successful or "
+    "not. The response carries a Retry-After header.",
+    "Request was throttled. Expected available in 42 seconds.",
+)
 
 
 # ---------------------------------------------------------------------------
@@ -191,6 +267,37 @@ def apply_status_change(mission, participant, new_status):
 # ---------------------------------------------------------------------------
 
 
+@extend_schema(
+    tags=["auth"],
+    summary="Register a participant",
+    description=(
+        "Creates the Django user and the participant profile in one transaction and "
+        "returns an auth token ready to use as `Authorization: Token <key>`. The "
+        "password is run through Django's configured password validators."
+    ),
+    auth=[],
+    request=RegisterSerializer,
+    responses={
+        201: OpenApiResponse(
+            response=RegisterResponseSerializer,
+            description="Participant created. The token is usable immediately.",
+        ),
+        400: OpenApiResponse(
+            response=RegisterSerializer,
+            description=(
+                "Field-keyed validation errors: duplicate username or handle, a "
+                "password rejected by Django's validators, or an unknown hostel id."
+            ),
+            examples=[
+                OpenApiExample(
+                    "duplicate handle",
+                    value={"handle": ["A participant with that handle already exists."]},
+                    response_only=True,
+                )
+            ],
+        ),
+    },
+)
 class RegisterView(GenericAPIView):
     """Create a user and their participant profile, and hand back a token."""
 
@@ -216,6 +323,22 @@ class RegisterView(GenericAPIView):
 # ---------------------------------------------------------------------------
 
 
+@extend_schema_view(
+    list=extend_schema(
+        summary="List hostels with live scores",
+        description=(
+            "Paginated. `score` and `cracked_count` are aggregated from cracked "
+            "missions on every request -- no score is stored anywhere."
+        ),
+    ),
+    retrieve=extend_schema(
+        summary="Hostel detail with its cracked missions",
+        responses={
+            200: HostelDetailSerializer,
+            404: RESPONSE_NOT_FOUND,
+        },
+    ),
+)
 class HostelViewSet(viewsets.ReadOnlyModelViewSet):
     """Hostels are seeded data: read-only over the API, managed in the admin."""
 
@@ -242,6 +365,18 @@ class HostelViewSet(viewsets.ReadOnlyModelViewSet):
         )
 
 
+@extend_schema(
+    tags=["leaderboard"],
+    summary="Live standings for every hostel",
+    description=(
+        "Public, and deliberately not paginated: all 17 hostels are returned, "
+        "including those on zero. Ordered by score descending then name ascending. "
+        "`rank` is computed with a SQL window function, so tied hostels share a rank "
+        "and the next rank skips (1, 2, 2, 4)."
+    ),
+    auth=[],
+    responses={200: LeaderboardSerializer(many=True)},
+)
 class LeaderboardView(GenericAPIView):
     """Live standings for all hostels. Public, and never paginated."""
 
@@ -266,6 +401,50 @@ class LeaderboardView(GenericAPIView):
         return Response(serializer.data)
 
 
+@extend_schema_view(
+    list=extend_schema(summary="List participants"),
+    retrieve=extend_schema(
+        summary="Participant detail", responses={200: ParticipantSerializer, 404: RESPONSE_NOT_FOUND}
+    ),
+    update=extend_schema(
+        summary="Replace a participant profile",
+        description=(
+            "Owner or staff. A non-staff caller may change `handle` only -- sending "
+            "`hostel_id` is refused with 403 rather than silently ignored."
+        ),
+        responses={
+            200: ParticipantSerializer,
+            400: OpenApiResponse(
+                response=ParticipantSerializer, description="Validation error, e.g. a duplicate handle."
+            ),
+            403: _plain("Not your profile, or you tried to change your hostel.", HANDLE_ONLY),
+            404: RESPONSE_NOT_FOUND,
+        },
+    ),
+    partial_update=extend_schema(
+        summary="Update a participant profile",
+        description=(
+            "Owner or staff. A non-staff caller may change `handle` only -- sending "
+            "`hostel_id` is refused with 403 rather than silently ignored."
+        ),
+        responses={
+            200: ParticipantSerializer,
+            400: OpenApiResponse(
+                response=ParticipantSerializer, description="Validation error, e.g. a duplicate handle."
+            ),
+            403: _plain("Not your profile, or you tried to change your hostel.", HANDLE_ONLY),
+            404: RESPONSE_NOT_FOUND,
+        },
+    ),
+    destroy=extend_schema(
+        summary="Delete a participant (staff only)",
+        responses={
+            204: OpenApiResponse(description="Deleted."),
+            403: _plain("Staff access required.", "Staff access required."),
+            404: RESPONSE_NOT_FOUND,
+        },
+    ),
+)
 class ParticipantViewSet(
     mixins.ListModelMixin,
     mixins.RetrieveModelMixin,
@@ -298,6 +477,17 @@ class ParticipantViewSet(
             raise PermissionDenied(HANDLE_ONLY)
         serializer.save()
 
+    @extend_schema(
+        summary="Your own participant profile",
+        description=(
+            "Requires a participant profile. An authenticated user without one -- a "
+            "bare staff account, for instance -- gets 403, not 404."
+        ),
+        responses={
+            200: ParticipantSerializer,
+            403: RESPONSE_NOT_PARTICIPANT,
+        },
+    )
     @action(detail=False, methods=["get"])
     def me(self, request):
         return Response(self.get_serializer(get_participant(request.user)).data)
@@ -308,6 +498,106 @@ class ParticipantViewSet(
 # ---------------------------------------------------------------------------
 
 
+MISSION_QUERY_PARAMETERS = [
+    OpenApiParameter(
+        name="status",
+        description=(
+            "Filter by **effective** status, not the stored column. `unclaimed` and "
+            "`in_progress` exclude anything past its deadline; `expired` includes "
+            "them alongside missions stored as expired; `cracked` is terminal and "
+            "survives its deadline."
+        ),
+        enum=[value for value, _ in STATUS_CHOICES],
+    ),
+    OpenApiParameter(
+        name="difficulty",
+        description="Exact difficulty match, e.g. `?difficulty=boss_level`.",
+        enum=[value for value, _ in DIFFICULTY_CHOICES],
+    ),
+    OpenApiParameter(
+        name="hostel",
+        type=int,
+        description=(
+            "Hostel id. A mission only gets a hostel when it is claimed, so unclaimed "
+            "missions match no hostel."
+        ),
+    ),
+    OpenApiParameter(
+        name="search",
+        description="Case-insensitive substring search over `codename` and `brief`.",
+    ),
+    OpenApiParameter(
+        name="ordering",
+        description="Sort field: `deadline`, `points` or `created_at`; prefix with `-` to reverse. Defaults to `deadline`.",
+    ),
+]
+
+
+@extend_schema_view(
+    list=extend_schema(
+        summary="List missions",
+        description=(
+            "Paginated, filterable and searchable. `status` in every response is the "
+            "effective status, with the deadline folded in."
+        ),
+        parameters=MISSION_QUERY_PARAMETERS,
+    ),
+    retrieve=extend_schema(
+        summary="Mission detail",
+        responses={200: MissionSerializer, 404: RESPONSE_NOT_FOUND},
+    ),
+    create=extend_schema(
+        summary="Create a mission (staff only)",
+        description=(
+            "`claimed_by` and `hostel` are read-only and ignored if sent -- a mission "
+            "acquires them only by being claimed. Consequently a mission cannot be "
+            "created as `in_progress` or `cracked`. Past deadlines are allowed; such "
+            "a mission simply reads as expired."
+        ),
+        responses={
+            201: MissionSerializer,
+            400: OpenApiResponse(
+                response=MissionSerializer,
+                description="Validation error, e.g. status in_progress/cracked with no claimant.",
+            ),
+            403: _plain("Staff access required.", "Staff access required."),
+        },
+    ),
+    update=extend_schema(
+        summary="Replace a mission",
+        description=(
+            "Staff may edit codename, brief, points, difficulty, deadline and status. "
+            "A claimant may send `status` and nothing else; any other key returns 403."
+        ),
+        responses={
+            200: MissionSerializer,
+            400: OpenApiResponse(response=MissionSerializer, description="Validation error or invalid transition."),
+            403: RESPONSE_NOT_CLAIMANT,
+            404: RESPONSE_NOT_FOUND,
+        },
+    ),
+    partial_update=extend_schema(
+        summary="Update a mission",
+        description=(
+            "Staff may edit codename, brief, points, difficulty, deadline and status. "
+            "A claimant may send `status` and nothing else; any other key returns 403."
+        ),
+        responses={
+            200: MissionSerializer,
+            400: OpenApiResponse(response=MissionSerializer, description="Validation error or invalid transition."),
+            403: RESPONSE_NOT_CLAIMANT,
+            404: RESPONSE_NOT_FOUND,
+        },
+    ),
+    destroy=extend_schema(
+        summary="Delete a mission (staff only)",
+        responses={
+            204: OpenApiResponse(description="Deleted."),
+            403: _plain("Staff access required.", "Staff access required."),
+            404: RESPONSE_NOT_FOUND,
+        },
+    ),
+)
 class MissionViewSet(viewsets.ModelViewSet):
     serializer_class = MissionSerializer
     permission_classes = [MissionAccessPolicy]
@@ -356,12 +646,57 @@ class MissionViewSet(viewsets.ModelViewSet):
 
     # -- Custom actions --------------------------------------------------------
 
+    @extend_schema(
+        summary="Claim a mission",
+        description=(
+            "Claims the mission for the calling participant: sets it to "
+            "`in_progress`, records the claimant, and copies **the claimant's** hostel "
+            "onto the mission.\n\n"
+            "**The request body is ignored.** Any `hostel` or `claimed_by` a client "
+            "sends has no effect.\n\n"
+            "Throttled to 5 attempts per minute per user. Every attempt counts, "
+            "including ones that go on to fail.\n\n"
+            "The write is a single conditional UPDATE, so two simultaneous claims "
+            "cannot both succeed -- the loser gets 409."
+        ),
+        request=None,
+        responses={
+            200: OpenApiResponse(response=MissionSerializer, description="Mission claimed."),
+            400: RESPONSE_EXPIRED,
+            403: RESPONSE_NOT_PARTICIPANT,
+            404: RESPONSE_NOT_FOUND,
+            409: RESPONSE_UNAVAILABLE,
+            429: RESPONSE_THROTTLED,
+        },
+    )
     @action(detail=True, methods=["post"], throttle_classes=[ClaimRateThrottle])
     def claim(self, request, pk=None):
         mission = self.get_object()
         claimed = claim_mission(mission, get_participant(request.user))
         return Response(MissionSerializer(claimed).data)
 
+    @extend_schema(
+        summary="Update the status of a mission you claimed",
+        description=(
+            "Claimant only. Allowed transitions:\n\n"
+            "| From (effective) | To | Result |\n"
+            "|---|---|---|\n"
+            "| `in_progress` | `in_progress` | 200, no-op |\n"
+            "| `in_progress` | `cracked` | 200 |\n"
+            "| `cracked` | anything | 400, cracked is final |\n"
+            "| expired | anything | 400 |\n\n"
+            "`status` is the only accepted key; anything else returns 403. "
+            "`PATCH /api/missions/{id}/` with a status-only body does exactly the same "
+            "thing -- both routes call one service function."
+        ),
+        request=MissionStatusSerializer,
+        responses={
+            200: OpenApiResponse(response=MissionSerializer, description="Status updated."),
+            400: RESPONSE_CRACKED_FINAL,
+            403: RESPONSE_NOT_CLAIMANT,
+            404: RESPONSE_NOT_FOUND,
+        },
+    )
     @action(detail=True, methods=["patch"], url_path="status", url_name="status")
     def set_status(self, request, pk=None):
         return self._change_status(request, self.get_object())

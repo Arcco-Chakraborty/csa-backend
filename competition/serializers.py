@@ -215,3 +215,15 @@ class LeaderboardSerializer(serializers.ModelSerializer):
     class Meta:
         model = Hostel
         fields = ["rank", "id", "name", "score", "cracked_count"]
+
+
+class ErrorSerializer(serializers.Serializer):
+    """DRF's standard error body, documented so the schema shows its shape."""
+
+    detail = serializers.CharField(read_only=True)
+
+
+class CodedErrorSerializer(ErrorSerializer):
+    """Competition-specific errors, which add a stable machine-readable ``code``."""
+
+    code = serializers.CharField(read_only=True)

@@ -2,3 +2,5 @@ Django==5.2.17
 djangorestframework==3.18.1
 django-filter==26.1
 drf-spectacular==0.30.0
+# Pulled in by drf-spectacular; pinned because the docs tests parse the schema with it.
+PyYAML==6.0.3
