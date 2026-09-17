@@ -1,0 +1,2097 @@
+{
+  "info": {
+    "_postman_id": "9b1f4e7a-2c3d-4f5a-8e6b-0d1c2a3b4c5d",
+    "name": "Operation Golden Keyboard",
+    "description": "End-to-end proof that the backend enforces the competition rules on its own.\n\n**Run the folders in order against a fresh `python manage.py seed_demo`.** Folder 0 captures every token and id into the environment, so nothing below it hardcodes a URL or an id.\n\nFolder 8 (rate limiting) should run last -- see its description.\n\nThe seven required cases are tagged `[required case N]` in the request names.",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "item": [
+    {
+      "name": "0. Setup",
+      "description": "Obtains tokens and discovers every id the rest of the collection needs. Nothing below this folder hardcodes an id, so the collection survives a re-seed with different primary keys.",
+      "item": [
+        {
+          "name": "Get staff token",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/api/auth/token/",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "auth",
+                "token",
+                ""
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"username\": \"staff\",\n  \"password\": \"staffpass123\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"Status is 200\", function () {",
+                  "    pm.response.to.have.status(200);",
+                  "});",
+                  "pm.environment.set(\"staff_token\", pm.response.json().token);",
+                  "pm.test(\"Token captured\", function () {",
+                  "    pm.expect(pm.environment.get(\"staff_token\")).to.be.a(\"string\").and.not.empty;",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Get alice token",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/api/auth/token/",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "auth",
+                "token",
+                ""
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"username\": \"alice\",\n  \"password\": \"alicepass123\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"Status is 200\", function () {",
+                  "    pm.response.to.have.status(200);",
+                  "});",
+                  "pm.environment.set(\"alice_token\", pm.response.json().token);"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Get bob token",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/api/auth/token/",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "auth",
+                "token",
+                ""
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"username\": \"bob\",\n  \"password\": \"bobpass123\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"Status is 200\", function () {",
+                  "    pm.response.to.have.status(200);",
+                  "});",
+                  "pm.environment.set(\"bob_token\", pm.response.json().token);"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Get alice profile (captures participant_id, hostel_id)",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Token {{alice_token}}"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/api/participants/me/",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "participants",
+                "me",
+                ""
+              ]
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"Status is 200\", function () {",
+                  "    pm.response.to.have.status(200);",
+                  "});",
+                  "const me = pm.response.json();",
+                  "pm.environment.set(\"participant_id\", me.id);",
+                  "pm.environment.set(\"hostel_id\", me.hostel.id);",
+                  "pm.environment.set(\"alice_handle\", me.handle);",
+                  "pm.test(\"Profile is nested, not a bare id\", function () {",
+                  "    pm.expect(me.hostel).to.have.property('name');",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Find a claimable mission (captures mission_id)",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Token {{alice_token}}"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/api/missions/?status=unclaimed",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "missions",
+                ""
+              ],
+              "query": [
+                {
+                  "key": "status",
+                  "value": "unclaimed"
+                }
+              ]
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"Status is 200\", function () {",
+                  "    pm.response.to.have.status(200);",
+                  "});",
+                  "const results = pm.response.json().results;",
+                  "pm.test(\"At least one claimable mission exists\", function () {",
+                  "    pm.expect(results.length).to.be.above(0);",
+                  "});",
+                  "pm.environment.set(\"mission_id\", results[0].id);",
+                  "pm.environment.set(\"mission_points\", results[0].points);"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Find a mission claimed by someone else (captures claimed_mission_id, throttle_mission_id)",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Token {{alice_token}}"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/api/missions/?status=in_progress",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "missions",
+                ""
+              ],
+              "query": [
+                {
+                  "key": "status",
+                  "value": "in_progress"
+                }
+              ]
+            },
+            "description": "The same mission doubles as the throttle target: claiming an already-claimed mission always fails, so it can be hammered without changing any state."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"Status is 200\", function () {",
+                  "    pm.response.to.have.status(200);",
+                  "});",
+                  "const results = pm.response.json().results;",
+                  "pm.test(\"A mission claimed by bob exists\", function () {",
+                  "    pm.expect(results.length).to.be.above(0);",
+                  "});",
+                  "pm.environment.set(\"claimed_mission_id\", results[0].id);",
+                  "pm.environment.set(\"throttle_mission_id\", results[0].id);"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Find the expired mission (captures expired_mission_id)",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Token {{alice_token}}"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/api/missions/?status=expired",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "missions",
+                ""
+              ],
+              "query": [
+                {
+                  "key": "status",
+                  "value": "expired"
+                }
+              ]
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"Status is 200\", function () {",
+                  "    pm.response.to.have.status(200);",
+                  "});",
+                  "const results = pm.response.json().results;",
+                  "pm.test(\"An expired mission exists\", function () {",
+                  "    pm.expect(results.length).to.be.above(0);",
+                  "});",
+                  "pm.environment.set(\"expired_mission_id\", results[0].id);"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Register new participant (201)",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/api/auth/register/",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "auth",
+                "register",
+                ""
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"username\": \"{{new_username}}\",\n  \"password\": \"RecruitPass!2026\",\n  \"handle\": \"{{new_username}}\",\n  \"hostel\": \"{{hostel_id}}\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "// A fresh username each run, so the collection can be run repeatedly.",
+                  "pm.environment.set(\"new_username\", \"recruit_\" + Date.now());"
+                ]
+              }
+            },
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"Status is 201\", function () {",
+                  "    pm.response.to.have.status(201);",
+                  "});",
+                  "const body = pm.response.json();",
+                  "pm.test(\"Returns a participant and a usable token\", function () {",
+                  "    pm.expect(body.participant).to.have.property(\"handle\");",
+                  "    pm.expect(body.token).to.be.a(\"string\").and.not.empty;",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Register duplicate handle (400)",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/api/auth/register/",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "auth",
+                "register",
+                ""
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"username\": \"{{new_username}}_again\",\n  \"password\": \"RecruitPass!2026\",\n  \"handle\": \"{{alice_handle}}\",\n  \"hostel\": \"{{hostel_id}}\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"Status is 400\", function () {",
+                  "    pm.response.to.have.status(400);",
+                  "});",
+                  "pm.test(\"Error is keyed to the handle field\", function () {",
+                  "    pm.expect(pm.response.json()).to.have.property(\"handle\");",
+                  "});"
+                ]
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "1. Hostels",
+      "description": "Hostels are read-only over the API. Scores are aggregated live; no score is stored on any row.",
+      "item": [
+        {
+          "name": "List hostels (200, 17 total)",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Token {{alice_token}}"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/api/hostels/",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "hostels",
+                ""
+              ]
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"Status is 200\", function () {",
+                  "    pm.response.to.have.status(200);",
+                  "});",
+                  "const body = pm.response.json();",
+                  "pm.test(\"All 17 hostels are present\", function () {",
+                  "    pm.expect(body.count).to.eql(17);",
+                  "});",
+                  "pm.test(\"List rows carry a derived score\", function () {",
+                  "    pm.expect(body.results[0]).to.have.property(\"score\");",
+                  "    pm.expect(body.results[0]).to.have.property(\"cracked_count\");",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Hostel detail (200, has score and cracked_missions)",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Token {{alice_token}}"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/api/hostels/{{hostel_id}}/",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "hostels",
+                "{{hostel_id}}",
+                ""
+              ]
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"Status is 200\", function () {",
+                  "    pm.response.to.have.status(200);",
+                  "});",
+                  "const body = pm.response.json();",
+                  "pm.test(\"Detail exposes score and cracked missions\", function () {",
+                  "    pm.expect(body).to.have.property(\"score\");",
+                  "    pm.expect(body).to.have.property(\"cracked_count\");",
+                  "    pm.expect(body.cracked_missions).to.be.an('array');",
+                  "});"
+                ]
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "2. Participants",
+      "description": "A participant may edit their own handle and nothing else. Hostel changes are staff-only.",
+      "item": [
+        {
+          "name": "List participants",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Token {{alice_token}}"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/api/participants/",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "participants",
+                ""
+              ]
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"Status is 200\", function () {",
+                  "    pm.response.to.have.status(200);",
+                  "});",
+                  "pm.test(\"Paginated envelope\", function () {",
+                  "    pm.expect(pm.response.json()).to.have.property(\"results\");",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Get participant detail",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Token {{alice_token}}"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/api/participants/{{participant_id}}/",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "participants",
+                "{{participant_id}}",
+                ""
+              ]
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"Status is 200\", function () {",
+                  "    pm.response.to.have.status(200);",
+                  "});",
+                  "pm.test(\"Hostel is nested\", function () {",
+                  "    pm.expect(pm.response.json().hostel).to.have.property('name');",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Get me",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Token {{alice_token}}"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/api/participants/me/",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "participants",
+                "me",
+                ""
+              ]
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"Status is 200\", function () {",
+                  "    pm.response.to.have.status(200);",
+                  "});",
+                  "pm.test(\"Returns the caller's own profile\", function () {",
+                  "    pm.expect(pm.response.json().id).to.eql(Number(pm.environment.get(\"participant_id\")));",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Alice patches own handle (200)",
+          "request": {
+            "method": "PATCH",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Token {{alice_token}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/api/participants/{{participant_id}}/",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "participants",
+                "{{participant_id}}",
+                ""
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"handle\": \"{{next_handle}}\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "// A fresh handle each run keeps the unique constraint satisfied.",
+                  "pm.environment.set(\"next_handle\", \"alice_\" + Date.now().toString().slice(-6));"
+                ]
+              }
+            },
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"Status is 200\", function () {",
+                  "    pm.response.to.have.status(200);",
+                  "});",
+                  "pm.test(\"Handle changed\", function () {",
+                  "    pm.expect(pm.response.json().handle).to.eql(pm.environment.get(\"next_handle\"));",
+                  "});",
+                  "pm.environment.set(\"alice_handle\", pm.response.json().handle);"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Alice patches bob's handle (403)",
+          "request": {
+            "method": "PATCH",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Token {{alice_token}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/api/participants/{{other_participant_id}}/",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "participants",
+                "{{other_participant_id}}",
+                ""
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"handle\": \"hijacked\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "description": "Deliberately targets another participant. The id is resolved at runtime by the pre-request script, which picks any participant that is not alice."
+          },
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "// Find a participant who is not alice, without hardcoding an id.",
+                  "pm.sendRequest({",
+                  "    url: pm.environment.get(\"base_url\") + \"/api/participants/\",",
+                  "    method: \"GET\",",
+                  "    header: { \"Authorization\": \"Token \" + pm.environment.get(\"alice_token\") }",
+                  "}, function (err, res) {",
+                  "    if (err) { return; }",
+                  "    const mine = Number(pm.environment.get(\"participant_id\"));",
+                  "    const other = res.json().results.find(function (p) { return p.id !== mine; });",
+                  "    if (other) { pm.environment.set(\"other_participant_id\", other.id); }",
+                  "});"
+                ]
+              }
+            },
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"Status is 403\", function () {",
+                  "    pm.response.to.have.status(403);",
+                  "});",
+                  "pm.test(\"Refusal explains itself\", function () {",
+                  "    pm.expect(pm.response.json()).to.have.property(\"detail\");",
+                  "});"
+                ]
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "3. Missions CRUD",
+      "description": "Only staff may create, edit the core fields of, or delete a mission.",
+      "item": [
+        {
+          "name": "Staff creates mission (201)",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Token {{staff_token}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/api/missions/",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "missions",
+                ""
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"codename\": \"{{new_codename}}\",\n  \"brief\": \"A mission created by the Postman collection.\",\n  \"points\": 120,\n  \"difficulty\": \"medium\",\n  \"deadline\": \"{{future_deadline}}\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "// Codenames are unique, so generate a fresh one each run.",
+                  "pm.environment.set(\"new_codename\", \"POSTMAN_OP_\" + Date.now());",
+                  "const week = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000);",
+                  "pm.environment.set(\"future_deadline\", week.toISOString());"
+                ]
+              }
+            },
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"Status is 201\", function () {",
+                  "    pm.response.to.have.status(201);",
+                  "});",
+                  "const body = pm.response.json();",
+                  "pm.environment.set(\"created_mission_id\", body.id);",
+                  "pm.test(\"New missions start unclaimed and unowned\", function () {",
+                  "    pm.expect(body.status).to.eql(\"unclaimed\");",
+                  "    pm.expect(body.claimed_by).to.be.null;",
+                  "    pm.expect(body.hostel).to.be.null;",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "List missions (200)",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Token {{alice_token}}"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/api/missions/",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "missions",
+                ""
+              ]
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"Status is 200\", function () {",
+                  "    pm.response.to.have.status(200);",
+                  "});",
+                  "const body = pm.response.json();",
+                  "pm.test(\"Paginated envelope\", function () {",
+                  "    pm.expect(body).to.have.property(\"count\");",
+                  "    pm.expect(body).to.have.property(\"next\");",
+                  "    pm.expect(body).to.have.property(\"previous\");",
+                  "    pm.expect(body).to.have.property(\"results\");",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Get mission detail (200, claimed_by nested)",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Token {{alice_token}}"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/api/missions/{{claimed_mission_id}}/",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "missions",
+                "{{claimed_mission_id}}",
+                ""
+              ]
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"Status is 200\", function () {",
+                  "    pm.response.to.have.status(200);",
+                  "});",
+                  "const body = pm.response.json();",
+                  "pm.test(\"Claimant and hostel are nested objects\", function () {",
+                  "    pm.expect(body.claimed_by).to.not.be.null;",
+                  "    pm.expect(body.claimed_by).to.have.property(\"handle\");",
+                  "    pm.expect(body.hostel).to.have.property(\"name\");",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Staff edits mission points (200)  [required case 5]",
+          "request": {
+            "method": "PATCH",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Token {{staff_token}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/api/missions/{{created_mission_id}}/",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "missions",
+                "{{created_mission_id}}",
+                ""
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"points\": 275\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"Status is 200\", function () {",
+                  "    pm.response.to.have.status(200);",
+                  "});",
+                  "pm.test(\"Points updated\", function () {",
+                  "    pm.expect(pm.response.json().points).to.eql(275);",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Alice creates mission (403)",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Token {{alice_token}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/api/missions/",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "missions",
+                ""
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"codename\": \"PARTICIPANT_SHOULD_NOT_CREATE\",\n  \"brief\": \"This must never be created.\",\n  \"points\": 100,\n  \"difficulty\": \"easy\",\n  \"deadline\": \"{{future_deadline}}\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"Status is 403\", function () {",
+                  "    pm.response.to.have.status(403);",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Staff deletes mission (204)",
+          "request": {
+            "method": "DELETE",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Token {{staff_token}}"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/api/missions/{{created_mission_id}}/",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "missions",
+                "{{created_mission_id}}",
+                ""
+              ]
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"Status is 204\", function () {",
+                  "    pm.response.to.have.status(204);",
+                  "});"
+                ]
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "4. Filtering, search, pagination",
+      "description": "The status filter works on effective status: a past-deadline mission whose row still says 'unclaimed' is excluded from ?status=unclaimed and included in ?status=expired.",
+      "item": [
+        {
+          "name": "?status=unclaimed",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Token {{alice_token}}"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/api/missions/?status=unclaimed",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "missions",
+                ""
+              ],
+              "query": [
+                {
+                  "key": "status",
+                  "value": "unclaimed"
+                }
+              ]
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"Status is 200\", function () {",
+                  "    pm.response.to.have.status(200);",
+                  "});",
+                  "const results = pm.response.json().results;",
+                  "pm.test(\"Every result really is unclaimed and unexpired\", function () {",
+                  "    results.forEach(function (m) {",
+                  "        pm.expect(m.status).to.eql(\"unclaimed\");",
+                  "        pm.expect(m.is_expired).to.be.false;",
+                  "        pm.expect(m.claimed_by).to.be.null;",
+                  "    });",
+                  "});",
+                  "pm.test(\"The expired mission is excluded\", function () {",
+                  "    const expiredId = Number(pm.environment.get(\"expired_mission_id\"));",
+                  "    pm.expect(results.map(function (m) { return m.id; })).to.not.include(expiredId);",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "?difficulty=boss_level",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Token {{alice_token}}"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/api/missions/?difficulty=boss_level",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "missions",
+                ""
+              ],
+              "query": [
+                {
+                  "key": "difficulty",
+                  "value": "boss_level"
+                }
+              ]
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"Status is 200\", function () {",
+                  "    pm.response.to.have.status(200);",
+                  "});",
+                  "const results = pm.response.json().results;",
+                  "pm.test(\"At least one boss_level mission, and only those\", function () {",
+                  "    pm.expect(results.length).to.be.above(0);",
+                  "    results.forEach(function (m) {",
+                  "        pm.expect(m.difficulty).to.eql(\"boss_level\");",
+                  "    });",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "?hostel={{hostel_id}}",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Token {{alice_token}}"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/api/missions/?hostel={{hostel_id}}",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "missions",
+                ""
+              ],
+              "query": [
+                {
+                  "key": "hostel",
+                  "value": "{{hostel_id}}"
+                }
+              ]
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"Status is 200\", function () {",
+                  "    pm.response.to.have.status(200);",
+                  "});",
+                  "const results = pm.response.json().results;",
+                  "pm.test(\"Every result belongs to that hostel\", function () {",
+                  "    const hostelId = Number(pm.environment.get(\"hostel_id\"));",
+                  "    results.forEach(function (m) {",
+                  "        pm.expect(m.hostel).to.not.be.null;",
+                  "        pm.expect(m.hostel.id).to.eql(hostelId);",
+                  "    });",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "?status=expired (includes the past-deadline 'unclaimed' mission)",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Token {{alice_token}}"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/api/missions/?status=expired",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "missions",
+                ""
+              ],
+              "query": [
+                {
+                  "key": "status",
+                  "value": "expired"
+                }
+              ]
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"Status is 200\", function () {",
+                  "    pm.response.to.have.status(200);",
+                  "});",
+                  "const results = pm.response.json().results;",
+                  "pm.test(\"The stored-unclaimed, past-deadline mission is here\", function () {",
+                  "    const expiredId = Number(pm.environment.get(\"expired_mission_id\"));",
+                  "    pm.expect(results.map(function (m) { return m.id; })).to.include(expiredId);",
+                  "});",
+                  "pm.test(\"Everything reported expired really is\", function () {",
+                  "    results.forEach(function (m) {",
+                  "        pm.expect(m.status).to.eql(\"expired\");",
+                  "        pm.expect(m.is_expired).to.be.true;",
+                  "    });",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "?search=binary",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Token {{alice_token}}"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/api/missions/?search=binary",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "missions",
+                ""
+              ],
+              "query": [
+                {
+                  "key": "search",
+                  "value": "binary"
+                }
+              ]
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"Status is 200\", function () {",
+                  "    pm.response.to.have.status(200);",
+                  "});",
+                  "const results = pm.response.json().results;",
+                  "pm.test(\"Search matches codename or brief\", function () {",
+                  "    pm.expect(results.length).to.be.above(0);",
+                  "    results.forEach(function (m) {",
+                  "        const haystack = (m.codename + \" \" + m.brief).toLowerCase();",
+                  "        pm.expect(haystack).to.include(\"binary\");",
+                  "    });",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "?page=2",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Token {{alice_token}}"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/api/missions/?page=2",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "missions",
+                ""
+              ],
+              "query": [
+                {
+                  "key": "page",
+                  "value": "2"
+                }
+              ]
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"Status is 200\", function () {",
+                  "    pm.response.to.have.status(200);",
+                  "});",
+                  "const body = pm.response.json();",
+                  "pm.test(\"Envelope carries count, next and previous\", function () {",
+                  "    pm.expect(body).to.have.property(\"count\");",
+                  "    pm.expect(body).to.have.property(\"next\");",
+                  "    pm.expect(body.previous).to.not.be.null;",
+                  "});",
+                  "pm.test(\"Page size comes from settings (10)\", function () {",
+                  "    pm.expect(body.results.length).to.be.at.most(10);",
+                  "});"
+                ]
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "5. Claiming and status",
+      "description": "The heart of the competition. Claiming is race-safe and ignores the request body; cracking is what moves the leaderboard.",
+      "item": [
+        {
+          "name": "Leaderboard before (captures score_before)",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}/api/leaderboard/",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "leaderboard",
+                ""
+              ]
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"Status is 200\", function () {",
+                  "    pm.response.to.have.status(200);",
+                  "});",
+                  "const board = pm.response.json();",
+                  "const hostelId = Number(pm.environment.get(\"hostel_id\"));",
+                  "const row = board.find(function (r) { return r.id === hostelId; });",
+                  "pm.environment.set(\"score_before\", row.score);"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Alice claims available mission (200)  [required case 1]",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Token {{alice_token}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/api/missions/{{mission_id}}/claim/",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "missions",
+                "{{mission_id}}",
+                "claim",
+                ""
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"hostel\": 99,\n  \"claimed_by\": 99,\n  \"points\": 99999\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "description": "The body deliberately contains hostel, claimed_by and points. All three must be ignored: the server copies the claimant's own hostel and leaves the points alone."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"Status is 200\", function () {",
+                  "    pm.response.to.have.status(200);",
+                  "});",
+                  "const body = pm.response.json();",
+                  "pm.test(\"Mission is now in progress and owned by alice\", function () {",
+                  "    pm.expect(body.status).to.eql(\"in_progress\");",
+                  "    pm.expect(body.claimed_by.id).to.eql(Number(pm.environment.get(\"participant_id\")));",
+                  "});",
+                  "pm.test(\"Server used the claimant's hostel, not the body's\", function () {",
+                  "    pm.expect(body.hostel.id).to.eql(Number(pm.environment.get(\"hostel_id\")));",
+                  "});",
+                  "pm.test(\"Points in the body were ignored\", function () {",
+                  "    pm.expect(body.points).to.not.eql(99999);",
+                  "});",
+                  "pm.environment.set(\"mission_points\", body.points);"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Bob claims same mission (409)  [required case 2]",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Token {{bob_token}}"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/api/missions/{{mission_id}}/claim/",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "missions",
+                "{{mission_id}}",
+                "claim",
+                ""
+              ]
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"Status is 409\", function () {",
+                  "    pm.response.to.have.status(409);",
+                  "});",
+                  "pm.test(\"Conflict carries a machine-readable code\", function () {",
+                  "    const body = pm.response.json();",
+                  "    pm.expect(body.code).to.eql(\"mission_unavailable\");",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Alice sets status cracked (200)",
+          "request": {
+            "method": "PATCH",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Token {{alice_token}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/api/missions/{{mission_id}}/status/",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "missions",
+                "{{mission_id}}",
+                "status",
+                ""
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"status\": \"cracked\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"Status is 200\", function () {",
+                  "    pm.response.to.have.status(200);",
+                  "});",
+                  "pm.test(\"Mission is cracked\", function () {",
+                  "    pm.expect(pm.response.json().status).to.eql(\"cracked\");",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Leaderboard reflects alice's hostel score increase (200)",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}/api/leaderboard/",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "leaderboard",
+                ""
+              ]
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"Status is 200\", function () {",
+                  "    pm.response.to.have.status(200);",
+                  "});",
+                  "const board = pm.response.json();",
+                  "const hostelId = Number(pm.environment.get(\"hostel_id\"));",
+                  "const row = board.find(function (r) { return r.id === hostelId; });",
+                  "const before = Number(pm.environment.get(\"score_before\"));",
+                  "const points = Number(pm.environment.get(\"mission_points\"));",
+                  "pm.test(\"Score rose by exactly the mission's points\", function () {",
+                  "    pm.expect(row.score).to.eql(before + points);",
+                  "});",
+                  "pm.test(\"Score is derived, never stored\", function () {",
+                  "    pm.expect(row.cracked_count).to.be.above(0);",
+                  "});"
+                ]
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "6. Rule violations",
+      "description": "Everything the backend must refuse. None of these may change any data.",
+      "item": [
+        {
+          "name": "Alice changes status of bob's mission (403)  [required case 3]",
+          "request": {
+            "method": "PATCH",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Token {{alice_token}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/api/missions/{{claimed_mission_id}}/status/",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "missions",
+                "{{claimed_mission_id}}",
+                "status",
+                ""
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"status\": \"cracked\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"Status is 403\", function () {",
+                  "    pm.response.to.have.status(403);",
+                  "});",
+                  "pm.test(\"Refused as not the claimant\", function () {",
+                  "    pm.expect(pm.response.json().detail).to.include('only update missions you claimed');",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Alice patches points on her own mission (403)  [required case 4]",
+          "request": {
+            "method": "PATCH",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Token {{alice_token}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/api/missions/{{mission_id}}/",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "missions",
+                "{{mission_id}}",
+                ""
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"points\": 9999\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"Status is 403\", function () {",
+                  "    pm.response.to.have.status(403);",
+                  "});",
+                  "pm.test(\"Refused as a forbidden field\", function () {",
+                  "    pm.expect(pm.response.json().detail).to.include('only update mission status');",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Alice patches hostel on her own mission (403)",
+          "request": {
+            "method": "PATCH",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Token {{alice_token}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/api/missions/{{mission_id}}/",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "missions",
+                "{{mission_id}}",
+                ""
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"hostel\": 2\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"Status is 403\", function () {",
+                  "    pm.response.to.have.status(403);",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Alice smuggles points alongside status (403)",
+          "request": {
+            "method": "PATCH",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Token {{alice_token}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/api/missions/{{mission_id}}/",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "missions",
+                "{{mission_id}}",
+                ""
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"status\": \"cracked\",\n  \"points\": 9999\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "description": "A status-only payload would be allowed. Adding one extra key must reject the whole request rather than applying the allowed part."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"Status is 403\", function () {",
+                  "    pm.response.to.have.status(403);",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Alice claims expired mission (400)  [required case 6]",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Token {{alice_token}}"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/api/missions/{{expired_mission_id}}/claim/",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "missions",
+                "{{expired_mission_id}}",
+                "claim",
+                ""
+              ]
+            },
+            "description": "This mission's stored status is still 'unclaimed'. Only the deadline makes it expired, and the API must honour that."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"Status is 400\", function () {",
+                  "    pm.response.to.have.status(400);",
+                  "});",
+                  "pm.test(\"Rejected as expired\", function () {",
+                  "    const body = pm.response.json();",
+                  "    pm.expect(body.code).to.eql(\"mission_expired\");",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Unauthenticated claim (401)",
+          "request": {
+            "method": "POST",
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}/api/missions/{{mission_id}}/claim/",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "missions",
+                "{{mission_id}}",
+                "claim",
+                ""
+              ]
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"Status is 401\", function () {",
+                  "    pm.response.to.have.status(401);",
+                  "});"
+                ]
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "7. Leaderboard",
+      "description": "Public, unpaginated, and computed on every request.",
+      "item": [
+        {
+          "name": "Get leaderboard (200, sorted desc, 17 entries)",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}/api/leaderboard/",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "leaderboard",
+                ""
+              ]
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"Status is 200\", function () {",
+                  "    pm.response.to.have.status(200);",
+                  "});",
+                  "const board = pm.response.json();",
+                  "pm.test(\"Not paginated: a bare array\", function () {",
+                  "    pm.expect(board).to.be.an('array');",
+                  "});",
+                  "pm.test(\"All 17 hostels, including zero-score ones\", function () {",
+                  "    pm.expect(board.length).to.eql(17);",
+                  "});",
+                  "pm.test(\"Sorted by score descending\", function () {",
+                  "    for (let i = 1; i < board.length; i++) {",
+                  "        pm.expect(board[i - 1].score).to.be.at.least(board[i].score);",
+                  "    }",
+                  "});",
+                  "pm.test(\"Tied hostels share a rank\", function () {",
+                  "    board.forEach(function (a) {",
+                  "        board.forEach(function (b) {",
+                  "            if (a.score === b.score) { pm.expect(a.rank).to.eql(b.rank); }",
+                  "        });",
+                  "    });",
+                  "});"
+                ]
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "8. Rate limiting",
+      "description": "Run this folder LAST.\n\nThe claim throttle is 5 attempts per minute per user and counts failed attempts, so this folder deliberately exhausts bob's quota.\n\n**Before re-running the whole collection, restart the server** (`Ctrl+C`, then `python manage.py runserver`) **or wait 60 seconds.** The throttle counters live in the server's local-memory cache, so re-seeding the database does not clear them -- and folder 5's 'Bob claims same mission (409)' would get 429 instead.\n\nAlternative to the pre-request script: run the single request below six times in the Collection Runner and watch the sixth return 429.",
+      "item": [
+        {
+          "name": "Claim spam - 6th attempt in a minute (429)  [required case 7]",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Token {{bob_token}}"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/api/missions/{{throttle_mission_id}}/claim/",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "missions",
+                "{{throttle_mission_id}}",
+                "claim",
+                ""
+              ]
+            },
+            "description": "The pre-request script fires five claim attempts as bob; this request is the sixth. The throttle is scoped to the claim action only, so no other endpoint is affected."
+          },
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "// Fire five claim attempts before this request runs, so that the request",
+                  "// itself is the sixth within the same minute and must be throttled.",
+                  "//",
+                  "// The target is a mission bob has already claimed, so every attempt fails",
+                  "// harmlessly with 409 -- failed attempts still consume throttle quota, which",
+                  "// is exactly the behaviour being demonstrated.",
+                  "const attempts = 5;",
+                  "const url = pm.environment.get(\"base_url\") + \"/api/missions/\" +",
+                  "    pm.environment.get(\"throttle_mission_id\") + \"/claim/\";",
+                  "",
+                  "function fire(n, done) {",
+                  "    if (n === 0) { return done(); }",
+                  "    pm.sendRequest({",
+                  "        url: url,",
+                  "        method: \"POST\",",
+                  "        header: { \"Authorization\": \"Token \" + pm.environment.get(\"bob_token\") }",
+                  "    }, function () {",
+                  "        fire(n - 1, done);",
+                  "    });",
+                  "}",
+                  "",
+                  "fire(attempts, function () {",
+                  "    console.log(\"Fired \" + attempts + \" warm-up claim attempts as bob.\");",
+                  "});"
+                ]
+              }
+            },
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"Status is 429\", function () {",
+                  "    pm.response.to.have.status(429);",
+                  "});",
+                  "pm.test(\"Retry-After tells the client when to come back\", function () {",
+                  "    pm.expect(pm.response.headers.has(\"Retry-After\")).to.be.true;",
+                  "});",
+                  "pm.test(\"Nothing was claimed\", function () {",
+                  "    pm.expect(pm.response.json()).to.have.property(\"detail\");",
+                  "});"
+                ]
+              }
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}
