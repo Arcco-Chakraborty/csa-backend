@@ -362,6 +362,6 @@ class MissionViewSet(viewsets.ModelViewSet):
         claimed = claim_mission(mission, get_participant(request.user))
         return Response(MissionSerializer(claimed).data)
 
-    @action(detail=True, methods=["patch"], url_path="status")
+    @action(detail=True, methods=["patch"], url_path="status", url_name="status")
     def set_status(self, request, pk=None):
         return self._change_status(request, self.get_object())
