@@ -30,7 +30,7 @@ class HostelQuerySet(models.QuerySet):
 class MissionQuerySet(models.QuerySet):
     def with_related(self):
         """Avoid N+1 queries when serializing nested claimant/hostel data."""
-        return self.select_related("claimed_by__user", "claimed_by__hostel", "hostel")
+        return self.select_related("claimed_by__hostel", "hostel")
 
     # -- Effective-status helpers -------------------------------------------------
     # "Effective" status folds the deadline in. The stored status may say `unclaimed`
