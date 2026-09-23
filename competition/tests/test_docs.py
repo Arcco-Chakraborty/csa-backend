@@ -95,6 +95,16 @@ class SchemaContentTests(TestCase):
         responses = self.schema["paths"]["/api/missions/{id}/status/"]["patch"]["responses"]
         self.assertEqual(set(responses), {"200", "400", "403", "404"})
 
+    def test_status_route_documents_both_of_its_400_codes(self):
+        """A status change after the deadline is the task's own example of a refusal,
+        so the docs must show ``mission_expired`` alongside ``cracked_is_final``."""
+        refusal = self.schema["paths"]["/api/missions/{id}/status/"]["patch"]["responses"]["400"]
+        examples = refusal["content"]["application/json"]["examples"]
+        self.assertEqual(
+            {example["value"]["code"] for example in examples.values()},
+            {"mission_expired", "cracked_is_final"},
+        )
+
     def test_mission_list_documents_its_query_parameters(self):
         params = self.schema["paths"]["/api/missions/"]["get"]["parameters"]
         names = {p["name"] for p in params}

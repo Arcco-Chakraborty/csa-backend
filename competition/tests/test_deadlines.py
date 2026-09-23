@@ -54,6 +54,26 @@ class DeadlineEnforcementTests(AuthenticatedAPITestCase):
         mission.refresh_from_db()
         self.assertEqual(mission.status, Status.IN_PROGRESS)
 
+    def test_status_change_on_a_mission_staff_marked_expired_is_rejected_as_expired(self):
+        """The deadline has not passed, but the stored status says ``expired``. That is
+        expired, not an ordinary invalid transition."""
+        mission = make_mission(
+            status=Status.EXPIRED,
+            claimed_by=self.alice,
+            hostel=self.hostel_a,
+            deadline=future(),
+        )
+        self.auth(self.alice_token)
+
+        response = self.client.patch(
+            self.status_url(mission), {"status": Status.CRACKED}, format="json"
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(response.json()["code"], "mission_expired")
+        mission.refresh_from_db()
+        self.assertEqual(mission.status, Status.EXPIRED)
+
     def test_status_change_is_allowed_right_up_to_the_deadline(self):
         mission = make_mission(
             status=Status.IN_PROGRESS,
@@ -113,6 +133,25 @@ class DeadlineEnforcementTests(AuthenticatedAPITestCase):
         self.assertEqual(ctx.exception.status_code, status.HTTP_400_BAD_REQUEST)
         mission.refresh_from_db()
         self.assertEqual(mission.status, Status.IN_PROGRESS)
+
+    def test_a_mission_released_between_read_and_write_is_refused_as_not_yours(self):
+        """Staff release the mission while the claimant's crack is in flight. The answer
+        is the one a moment-later request would get -- 403, it is not yours any more --
+        rather than a misleading "expired" for a mission that is live and open."""
+        mission = make_mission(
+            status=Status.IN_PROGRESS, claimed_by=self.alice, hostel=self.hostel_a
+        )
+        stale = Mission.objects.get(pk=mission.pk)
+        Mission.objects.filter(pk=mission.pk).update(
+            status=Status.UNCLAIMED, claimed_by=None, hostel=None
+        )
+
+        with self.assertRaises(Exception) as ctx:
+            apply_status_change(stale, self.alice, Status.CRACKED)
+
+        self.assertEqual(ctx.exception.status_code, status.HTTP_403_FORBIDDEN)
+        mission.refresh_from_db()
+        self.assertEqual(mission.status, Status.UNCLAIMED)
 
     # -- Claims -----------------------------------------------------------------
 

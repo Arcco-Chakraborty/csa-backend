@@ -95,6 +95,19 @@ class ClaimTests(AuthenticatedAPITestCase):
         self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
         self.assertEqual(response.json()["code"], "mission_expired")
 
+    def test_a_mission_stored_as_expired_is_expired_even_before_its_deadline(self):
+        """Staff may void a mission by setting ``expired``, deadline untouched. It is
+        expired all the same: 400 ``mission_expired``, not 409 ``mission_unavailable``."""
+        mission = make_mission(status=Status.EXPIRED, deadline=future())
+        self.auth(self.alice_token)
+
+        response = self.client.post(self.claim_url(mission))
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(response.json()["code"], "mission_expired")
+        mission.refresh_from_db()
+        self.assertIsNone(mission.claimed_by_id)
+
     def test_claiming_an_unclaimed_mission_past_its_deadline_is_rejected(self):
         """The stored status says `unclaimed`; the deadline says otherwise."""
         mission = make_mission(status=Status.UNCLAIMED, deadline=past())

@@ -37,7 +37,8 @@ DIFFICULTY_CHOICES = Difficulty.choices
 #: ``expired`` once the deadline passes. ``cracked`` and ``expired`` are terminal.
 PERISHABLE_STATUSES = (Status.UNCLAIMED, Status.IN_PROGRESS)
 
-#: The only statuses a participant may write, via the claimant status route.
+#: The statuses only a mission's claimant may write, via the claim and status routes.
+#: Staff cannot set them (task §4); staff status writes are limited to the other two.
 PARTICIPANT_WRITABLE_STATUSES = (Status.IN_PROGRESS, Status.CRACKED)
 
 #: The only mission field a participant may include in a PATCH payload.

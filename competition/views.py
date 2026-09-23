@@ -2,9 +2,10 @@
 
 The two service functions at the top -- :func:`claim_mission` and
 :func:`apply_status_change` -- hold every rule about claiming and status transitions.
-Both routes that can change a mission's status call the same one, so
+For a claimant, both routes that can change a mission's status call the same one, so
 ``PATCH /api/missions/{id}/`` and ``PATCH /api/missions/{id}/status/`` cannot drift
-apart.
+apart. Staff edits on the generic route go through ``MissionSerializer`` instead, which
+may only release or void a mission -- never claim or crack one.
 
 Both end in a *conditional* ``UPDATE``: the row is only written if the database still
 agrees it is claimable / still in progress and still inside its deadline. That single
@@ -139,8 +140,9 @@ def _plain(description, detail):
 
 
 RESPONSE_EXPIRED = _coded(
-    "The mission's deadline has passed. Expiry is computed from the deadline, so this "
-    "happens even when the stored status still reads 'unclaimed'.",
+    "The mission has expired: its deadline has passed, or staff marked it expired. "
+    "Expiry is computed from the deadline, so this happens even when the stored "
+    "status still reads 'unclaimed'.",
     "Mission has expired.",
     "mission_expired",
 )
@@ -149,10 +151,22 @@ RESPONSE_UNAVAILABLE = _coded(
     "Mission is not available to claim.",
     "mission_unavailable",
 )
-RESPONSE_CRACKED_FINAL = _coded(
-    "The mission is already cracked. Cracked is terminal.",
-    "Cracked missions are final.",
-    "cracked_is_final",
+RESPONSE_STATUS_REFUSED = OpenApiResponse(
+    response=CodedErrorSerializer,
+    description=(
+        "The change is refused. `mission_expired`: the deadline has passed, or staff "
+        "marked the mission expired -- checked against the real deadline, not the "
+        "stored status. `cracked_is_final`: the mission is already cracked. A `status` "
+        "other than `in_progress` or `cracked` is a field-keyed validation error."
+    ),
+    examples=[
+        OpenApiExample(
+            error.code_value,
+            value={"detail": error.default_detail, "code": error.code_value},
+            response_only=True,
+        )
+        for error in (MissionExpired, CrackedIsFinal)
+    ],
 )
 RESPONSE_NOT_CLAIMANT = _plain(
     "You are not this mission's claimant, or you sent a field other than 'status'.",
@@ -180,8 +194,11 @@ def _reject_unclaimable(mission):
 
     Called both up-front and again after a losing conditional update, so a caller that
     lost a race gets the same answer it would have got had it arrived a moment later.
+
+    Expired means *effectively* expired: past the deadline, or stored as ``expired`` by
+    staff with the deadline untouched. Both are 400, never 409.
     """
-    if mission.is_past_deadline() and mission.status != Status.CRACKED:
+    if mission.effective_status == Status.EXPIRED:
         raise MissionExpired()
     raise MissionUnavailable()
 
@@ -227,8 +244,9 @@ def apply_status_change(mission, participant, new_status):
     if effective == Status.CRACKED:
         raise CrackedIsFinal()
 
-    # Everything below needs a live, in-progress mission.
-    if mission.is_past_deadline():
+    # Everything below needs a live, in-progress mission. Expired covers both a passed
+    # deadline and a mission staff stored as expired.
+    if effective == Status.EXPIRED:
         raise MissionExpired()
 
     if effective != Status.IN_PROGRESS:
@@ -255,6 +273,10 @@ def apply_status_change(mission, participant, new_status):
 
     if updated == 0:
         fresh = Mission.objects.get(pk=mission.pk)
+        if fresh.claimed_by_id != participant.id:
+            # Released or reassigned mid-flight. A moment later the permission layer
+            # would refuse this caller outright, so refuse the same way.
+            raise PermissionDenied(NOT_THE_CLAIMANT)
         if fresh.status == Status.CRACKED:
             raise CrackedIsFinal()
         raise MissionExpired()
@@ -550,15 +572,16 @@ MISSION_QUERY_PARAMETERS = [
         summary="Create a mission (staff only)",
         description=(
             "`claimed_by` and `hostel` are read-only and ignored if sent -- a mission "
-            "acquires them only by being claimed. Consequently a mission cannot be "
-            "created as `in_progress` or `cracked`. Past deadlines are allowed; such "
-            "a mission simply reads as expired."
+            "acquires them only by being claimed. Only a claimant can put a mission in "
+            "`in_progress` or `cracked`, so a new mission starts `unclaimed` (the "
+            "default) or `expired`. Past deadlines are allowed; such a mission simply "
+            "reads as expired."
         ),
         responses={
             201: MissionSerializer,
             400: OpenApiResponse(
                 response=MissionSerializer,
-                description="Validation error, e.g. status in_progress/cracked with no claimant.",
+                description="Validation error, e.g. status in_progress or cracked (only a claimant can set those).",
             ),
             403: _plain("Staff access required.", "Staff access required."),
         },
@@ -566,12 +589,15 @@ MISSION_QUERY_PARAMETERS = [
     update=extend_schema(
         summary="Replace a mission",
         description=(
-            "Staff may edit codename, brief, points, difficulty, deadline and status. "
+            "Staff may edit codename, brief, points, difficulty and deadline. Staff may "
+            "set `status` only to `unclaimed` (releases the claim) or `expired`; only "
+            "the claimant can move a mission into `in_progress` or `cracked`, so staff "
+            "get 400 for those. Re-sending the current status is not a change.\n\n"
             "A claimant may send `status` and nothing else; any other key returns 403."
         ),
         responses={
             200: MissionSerializer,
-            400: OpenApiResponse(response=MissionSerializer, description="Validation error or invalid transition."),
+            400: OpenApiResponse(response=MissionSerializer, description="Validation error, e.g. staff setting status to in_progress or cracked, or an invalid transition."),
             403: RESPONSE_NOT_CLAIMANT,
             404: RESPONSE_NOT_FOUND,
         },
@@ -579,12 +605,15 @@ MISSION_QUERY_PARAMETERS = [
     partial_update=extend_schema(
         summary="Update a mission",
         description=(
-            "Staff may edit codename, brief, points, difficulty, deadline and status. "
+            "Staff may edit codename, brief, points, difficulty and deadline. Staff may "
+            "set `status` only to `unclaimed` (releases the claim) or `expired`; only "
+            "the claimant can move a mission into `in_progress` or `cracked`, so staff "
+            "get 400 for those. Re-sending the current status is not a change.\n\n"
             "A claimant may send `status` and nothing else; any other key returns 403."
         ),
         responses={
             200: MissionSerializer,
-            400: OpenApiResponse(response=MissionSerializer, description="Validation error or invalid transition."),
+            400: OpenApiResponse(response=MissionSerializer, description="Validation error, e.g. staff setting status to in_progress or cracked, or an invalid transition."),
             403: RESPONSE_NOT_CLAIMANT,
             404: RESPONSE_NOT_FOUND,
         },
@@ -620,8 +649,10 @@ class MissionViewSet(viewsets.ModelViewSet):
     # -- Writes ----------------------------------------------------------------
 
     def update(self, request, *args, **kwargs):
-        """Staff edit missions here; a claimant's status-only PATCH is routed to the
-        same service the dedicated status route uses, so the two agree by construction.
+        """Staff edit missions here. Anyone else can only be a claimant changing status,
+        which is routed to the same service the dedicated status route uses, so the two
+        agree by construction. A staff account always gets the admin edit on this
+        route, so a staff member who also competes changes status through /status/.
         """
         if not request.user.is_staff:
             mission = self.get_object()  # runs MissionAccessPolicy object checks
@@ -683,16 +714,20 @@ class MissionViewSet(viewsets.ModelViewSet):
             "|---|---|---|\n"
             "| `in_progress` | `in_progress` | 200, no-op |\n"
             "| `in_progress` | `cracked` | 200 |\n"
-            "| `cracked` | anything | 400, cracked is final |\n"
-            "| expired | anything | 400 |\n\n"
-            "`status` is the only accepted key; anything else returns 403. "
+            "| `cracked` | `in_progress` or `cracked` | 400 `cracked_is_final` |\n"
+            "| expired (deadline passed, or marked by staff) | `in_progress` or "
+            "`cracked` | 400 `mission_expired` |\n\n"
+            "Any other `status` value is a 400 validation error on the field, and any "
+            "key other than `status` returns 403. For a claimant without staff rights, "
             "`PATCH /api/missions/{id}/` with a status-only body does exactly the same "
-            "thing -- both routes call one service function."
+            "thing -- both routes call one service function. (A staff account's generic "
+            "PATCH is an admin edit, so a staff member who also competes uses this "
+            "route.)"
         ),
         request=MissionStatusSerializer,
         responses={
             200: OpenApiResponse(response=MissionSerializer, description="Status updated."),
-            400: RESPONSE_CRACKED_FINAL,
+            400: RESPONSE_STATUS_REFUSED,
             403: RESPONSE_NOT_CLAIMANT,
             404: RESPONSE_NOT_FOUND,
         },

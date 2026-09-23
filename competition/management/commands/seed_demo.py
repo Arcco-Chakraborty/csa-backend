@@ -6,7 +6,8 @@ wipes the competition data first (hostels are left alone -- they are migration-s
 
 The mission mix is chosen to make every Postman case reachable in one run:
 a claimable mission, one already taken by someone else, cracked missions in two
-different hostels, and one whose row says ``unclaimed`` while its deadline has passed.
+different hostels, one whose row says ``unclaimed`` while its deadline has passed, and
+one alice claimed but did not crack before its deadline.
 """
 
 from datetime import timedelta
@@ -136,6 +137,19 @@ class Command(BaseCommand):
             hostel=None,
         )
 
+        # Alice claimed this one, but the clock ran out before she cracked it. The row
+        # says in_progress; the deadline says expired, so cracking it must fail.
+        overdue = self._upsert_mission(
+            codename="OVERTIME",
+            brief="Alice claimed this, but the deadline passed before she cracked it.",
+            points=120,
+            difficulty=Difficulty.MEDIUM,
+            deadline=now - timedelta(hours=2),
+            status=Status.IN_PROGRESS,
+            claimed_by=alice,
+            hostel=alice.hostel,
+        )
+
         self._report(
             staff_token=staff_token,
             alice_token=alice_token,
@@ -146,6 +160,7 @@ class Command(BaseCommand):
             throttle_target=claimed,
             claimed=claimed,
             expired=expired,
+            overdue=overdue,
         )
 
     # -- Builders ---------------------------------------------------------------
@@ -197,12 +212,14 @@ class Command(BaseCommand):
         write(f"  mission_id            {ctx['claimable'].id}   {ctx['claimable'].codename} (unclaimed, claimable)")
         write(f"  claimed_mission_id    {ctx['claimed'].id}   {ctx['claimed'].codename} (in_progress, bob's)")
         write(f"  expired_mission_id    {ctx['expired'].id}   {ctx['expired'].codename} (stored unclaimed, past deadline)")
+        write(f"  overdue_mission_id    {ctx['overdue'].id}   {ctx['overdue'].codename} (alice's, stored in_progress, past deadline)")
         write(f"  throttle_mission_id   {ctx['throttle_target'].id}   {ctx['throttle_target'].codename} (claim it repeatedly to hit 429)")
         write("")
         write("Other ids:")
-        write(f"  hostel_id        {ctx['alice'].hostel_id}   {ctx['alice'].hostel.name} (alice's)")
-        write(f"  participant_id   {ctx['alice'].id}   alice")
-        write(f"  bob_participant  {ctx['bob'].id}   bob")
+        write(f"  hostel_id            {ctx['alice'].hostel_id}   {ctx['alice'].hostel.name} (alice's)")
+        write(f"  participant_id       {ctx['alice'].id}   alice")
+        write(f"  other_hostel_id      {ctx['bob'].hostel_id}   {ctx['bob'].hostel.name} (bob's)")
+        write(f"  bob_participant_id   {ctx['bob'].id}   bob")
         write("")
         write(f"Missions in total: {Mission.objects.count()}")
         write("")

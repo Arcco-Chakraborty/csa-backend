@@ -8,10 +8,12 @@ the same request.
 from django.core.cache import cache
 from django.urls import reverse
 from rest_framework import status
+from rest_framework.authtoken.models import Token
 
 from competition.constants import Difficulty, Status
 from competition.models import Mission
 from competition.permissions import NOT_THE_CLAIMANT, STATUS_ONLY
+from competition.serializers import MissionSerializer
 from competition.views import HANDLE_ONLY
 
 from .factories import future, make_cracked, make_mission, make_participant, past
@@ -347,7 +349,6 @@ class MissionCrudPermissionTests(AuthenticatedAPITestCase):
         """A plain, non-staff account with no profile: 403, not 500."""
         stranger = make_participant("stranger", hostel=self.hostel_c)
         stranger.delete()  # leaves the User with no participant row
-        from rest_framework.authtoken.models import Token
 
         token = Token.objects.create(user=stranger.user).key
         mission = make_mission()
@@ -359,6 +360,192 @@ class MissionCrudPermissionTests(AuthenticatedAPITestCase):
             format="json",
         )
         self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
+
+
+class StaffStatusRestrictionTests(AuthenticatedAPITestCase):
+    """Task §4: only the claimant may move a mission into in_progress or cracked.
+
+    Staff administer missions -- they edit the core fields, release a mission
+    (``unclaimed``) or void it (``expired``) -- but they cannot award a crack, or undo
+    one back into ``in_progress``, on a claimant's behalf.
+    """
+
+    def detail_url(self, mission):
+        return reverse("mission-detail", args=[mission.id])
+
+    def score(self, hostel):
+        board = {row["id"]: row for row in self.client.get(reverse("leaderboard")).json()}
+        return board[hostel.id]["score"]
+
+    def test_staff_cannot_crack_a_claimed_mission(self):
+        self.auth(self.staff_token)
+        for label, deadline in (("before deadline", future()), ("after deadline", past())):
+            with self.subTest(label):
+                mission = make_mission(
+                    points=220,
+                    status=Status.IN_PROGRESS,
+                    claimed_by=self.bob,
+                    deadline=deadline,
+                )
+                response = self.client.patch(
+                    self.detail_url(mission), {"status": Status.CRACKED}, format="json"
+                )
+
+                self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+                self.assertIn("status", response.json())
+                mission.refresh_from_db()
+                self.assertEqual(mission.status, Status.IN_PROGRESS)
+        self.assertEqual(self.score(self.hostel_b), 0)
+
+    def test_staff_cannot_revert_a_cracked_mission_to_in_progress(self):
+        mission = make_cracked(self.alice, points=150)
+        self.auth(self.staff_token)
+
+        response = self.client.patch(
+            self.detail_url(mission), {"status": Status.IN_PROGRESS}, format="json"
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn("status", response.json())
+        mission.refresh_from_db()
+        self.assertEqual(mission.status, Status.CRACKED)
+        self.assertEqual(self.score(self.hostel_a), 150)
+
+    def test_staff_cannot_move_an_unclaimed_mission_into_in_progress_or_cracked(self):
+        self.auth(self.staff_token)
+        for target in (Status.IN_PROGRESS, Status.CRACKED):
+            with self.subTest(status=target):
+                mission = make_mission()
+                response = self.client.patch(
+                    self.detail_url(mission), {"status": target}, format="json"
+                )
+
+                self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+                self.assertIn("status", response.json())
+                mission.refresh_from_db()
+                self.assertEqual(mission.status, Status.UNCLAIMED)
+
+    def test_staff_put_that_leaves_status_unchanged_still_succeeds(self):
+        """A GET-then-PUT round trip echoes the current status back. That is not a
+        status change, so it must not be refused."""
+        self.auth(self.staff_token)
+        for stored in (Status.IN_PROGRESS, Status.CRACKED):
+            with self.subTest(status=stored):
+                mission = make_mission(points=100, status=stored, claimed_by=self.alice)
+                body = self.client.get(self.detail_url(mission)).json()
+                body["points"] = 175
+
+                response = self.client.put(self.detail_url(mission), body, format="json")
+
+                self.assertEqual(response.status_code, status.HTTP_200_OK)
+                mission.refresh_from_db()
+                self.assertEqual(mission.points, 175)
+                self.assertEqual(mission.status, stored)
+                self.assertEqual(mission.claimed_by_id, self.alice.id)
+
+    def test_a_round_trip_on_an_overdue_mission_does_not_store_expired(self):
+        """GET reports an overdue in-progress mission as ``expired``. Echoing that back in
+        a PUT that extends the deadline must not persist ``expired`` -- expiry is
+        computed, never stored -- so the claimant can crack it once it is live again."""
+        mission = make_mission(
+            status=Status.IN_PROGRESS, claimed_by=self.alice, deadline=past()
+        )
+        self.auth(self.staff_token)
+        body = self.client.get(self.detail_url(mission)).json()
+        self.assertEqual(body["status"], Status.EXPIRED)
+        body["deadline"] = future().isoformat()
+
+        response = self.client.put(self.detail_url(mission), body, format="json")
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        mission.refresh_from_db()
+        self.assertEqual(mission.status, Status.IN_PROGRESS)
+
+        self.auth(self.alice_token)
+        crack = self.client.patch(
+            reverse("mission-status", args=[mission.id]),
+            {"status": Status.CRACKED},
+            format="json",
+        )
+        self.assertEqual(crack.status_code, status.HTTP_200_OK)
+
+    def test_a_staff_member_who_claimed_a_mission_is_a_claimant_like_any_other(self):
+        """Staff who also compete crack their own missions on the claimant route, which
+        enforces the deadline -- and no route lets them crack once it has passed."""
+        competitor = make_participant("staff_competitor", hostel=self.hostel_c)
+        competitor.user.is_staff = True
+        competitor.user.save()
+        live = make_mission(status=Status.IN_PROGRESS, claimed_by=competitor)
+        overdue = make_mission(
+            status=Status.IN_PROGRESS, claimed_by=competitor, deadline=past()
+        )
+        self.auth(Token.objects.create(user=competitor.user).key)
+
+        response = self.client.patch(
+            reverse("mission-status", args=[live.id]),
+            {"status": Status.CRACKED},
+            format="json",
+        )
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+
+        for url in (reverse("mission-status", args=[overdue.id]), self.detail_url(overdue)):
+            with self.subTest(url=url):
+                response = self.client.patch(url, {"status": Status.CRACKED}, format="json")
+                self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        overdue.refresh_from_db()
+        self.assertEqual(overdue.status, Status.IN_PROGRESS)
+
+    def test_staff_may_void_a_claimed_mission_by_marking_it_expired(self):
+        mission = make_mission(status=Status.IN_PROGRESS, claimed_by=self.bob)
+        self.auth(self.staff_token)
+
+        response = self.client.patch(
+            self.detail_url(mission), {"status": Status.EXPIRED}, format="json"
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.json()["status"], Status.EXPIRED)
+        mission.refresh_from_db()
+        self.assertEqual(mission.status, Status.EXPIRED)
+
+
+class StaffEditRaceTests(AuthenticatedAPITestCase):
+    """A staff edit writes only the fields it sent.
+
+    Saving every column of the instance loaded when the request began would silently
+    write a claim or crack that landed mid-request back over. These hand the serializer
+    a stale instance -- the interleaving a real race produces, deterministically.
+    """
+
+    def staff_edit(self, stale, data):
+        serializer = MissionSerializer(stale, data=data, partial=True)
+        serializer.is_valid(raise_exception=True)
+        serializer.save()
+
+    def test_a_staff_edit_does_not_undo_a_crack_that_landed_mid_request(self):
+        mission = make_mission(points=100, status=Status.IN_PROGRESS, claimed_by=self.alice)
+        stale = Mission.objects.get(pk=mission.pk)
+        Mission.objects.filter(pk=mission.pk).update(status=Status.CRACKED)
+
+        self.staff_edit(stale, {"points": 275})
+
+        mission.refresh_from_db()
+        self.assertEqual(mission.points, 275)
+        self.assertEqual(mission.status, Status.CRACKED)
+
+    def test_a_staff_edit_does_not_undo_a_claim_that_landed_mid_request(self):
+        mission = make_mission(points=100)
+        stale = Mission.objects.get(pk=mission.pk)
+        Mission.objects.filter(pk=mission.pk).update(
+            status=Status.IN_PROGRESS, claimed_by=self.alice, hostel=self.hostel_a
+        )
+
+        self.staff_edit(stale, {"points": 275})
+
+        mission.refresh_from_db()
+        self.assertEqual(mission.points, 275)
+        self.assertEqual(mission.status, Status.IN_PROGRESS)
+        self.assertEqual(mission.claimed_by_id, self.alice.id)
 
 
 class ParticipantProfilePermissionTests(AuthenticatedAPITestCase):

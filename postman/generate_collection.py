@@ -7,8 +7,8 @@ readable and the output is guaranteed to be valid JSON.
 import json
 import pathlib
 
-OUT = pathlib.Path(r"D:\Projects\CSA\Backend\postman")
-OUT.mkdir(exist_ok=True)
+# Next to this script, wherever the repository is checked out.
+OUT = pathlib.Path(__file__).resolve().parent
 
 BASE = "{{base_url}}"
 
@@ -158,7 +158,7 @@ setup = folder(
             ),
         ),
         req(
-            "Find a mission claimed by someone else (captures claimed_mission_id, throttle_mission_id)",
+            "Find a mission claimed by someone else (captures claimed_mission_id, throttle_mission_id, other_hostel_id)",
             "GET",
             "/api/missions/",
             token="alice_token",
@@ -166,16 +166,24 @@ setup = folder(
             description=(
                 "The same mission doubles as the throttle target: claiming an "
                 "already-claimed mission always fails, so it can be hammered without "
-                "changing any state."
+                "changing any state. Its claimant and hostel (bob's) are captured "
+                "too, so later requests can try to write them without hardcoding ids."
             ),
             tests=status_test(
                 200,
-                "const results = pm.response.json().results;",
-                'pm.test("A mission claimed by bob exists", function () {',
-                "    pm.expect(results.length).to.be.above(0);",
+                'const mine = Number(pm.environment.get("participant_id"));',
+                "const theirs = pm.response.json().results.find(function (m) {",
+                "    return m.claimed_by && m.claimed_by.id !== mine;",
                 "});",
-                'pm.environment.set("claimed_mission_id", results[0].id);',
-                'pm.environment.set("throttle_mission_id", results[0].id);',
+                'pm.test("A mission claimed by bob exists", function () {',
+                "    pm.expect(theirs).to.not.be.undefined;",
+                "});",
+                "if (theirs) {",
+                '    pm.environment.set("claimed_mission_id", theirs.id);',
+                '    pm.environment.set("throttle_mission_id", theirs.id);',
+                '    pm.environment.set("bob_participant_id", theirs.claimed_by.id);',
+                '    pm.environment.set("other_hostel_id", theirs.hostel.id);',
+                "}",
             ),
         ),
         req(
@@ -184,13 +192,41 @@ setup = folder(
             "/api/missions/",
             token="alice_token",
             query=[("status", "expired")],
+            description=(
+                "Picks the unclaimed one: its row still says 'unclaimed' and only the "
+                "passed deadline makes it expired."
+            ),
             tests=status_test(
                 200,
-                "const results = pm.response.json().results;",
-                'pm.test("An expired mission exists", function () {',
-                "    pm.expect(results.length).to.be.above(0);",
+                "const ghost = pm.response.json().results.find(function (m) {",
+                "    return m.claimed_by === null;",
                 "});",
-                'pm.environment.set("expired_mission_id", results[0].id);',
+                'pm.test("An unclaimed, expired mission exists", function () {',
+                "    pm.expect(ghost).to.not.be.undefined;",
+                "});",
+                'if (ghost) { pm.environment.set("expired_mission_id", ghost.id); }',
+            ),
+        ),
+        req(
+            "Find alice's overdue mission (captures overdue_mission_id)",
+            "GET",
+            "/api/missions/",
+            token="alice_token",
+            query=[("status", "expired"), ("hostel", "{{hostel_id}}")],
+            description=(
+                "Alice claimed this mission, but its deadline passed before she cracked "
+                "it. The row still says 'in_progress'; the API reports it as expired."
+            ),
+            tests=status_test(
+                200,
+                'const mine = Number(pm.environment.get("participant_id"));',
+                "const overdue = pm.response.json().results.find(function (m) {",
+                "    return m.claimed_by && m.claimed_by.id === mine;",
+                "});",
+                'pm.test("Alice has an overdue mission", function () {',
+                "    pm.expect(overdue).to.not.be.undefined;",
+                "});",
+                'if (overdue) { pm.environment.set("overdue_mission_id", overdue.id); }',
             ),
         ),
         req(
@@ -629,11 +665,15 @@ claiming = folder(
             "POST",
             "/api/missions/{{mission_id}}/claim/",
             token="alice_token",
-            body={"hostel": 99, "claimed_by": 99, "points": 99999},
+            body={
+                "hostel": "{{other_hostel_id}}",
+                "claimed_by": "{{bob_participant_id}}",
+                "points": 99999,
+            },
             description=(
-                "The body deliberately contains hostel, claimed_by and points. All "
-                "three must be ignored: the server copies the claimant's own hostel "
-                "and leaves the points alone."
+                "The body deliberately tries to credit bob and bob's hostel, and to "
+                "inflate the points. All three must be ignored: the server copies the "
+                "claimant's own hostel and leaves the points alone."
             ),
             tests=status_test(
                 200,
@@ -721,6 +761,24 @@ violations = folder(
             ),
         ),
         req(
+            "Staff cracks bob's mission (400)",
+            "PATCH",
+            "/api/missions/{{claimed_mission_id}}/",
+            token="staff_token",
+            body={"status": "cracked"},
+            description=(
+                "Only the participant who claimed a mission may move it to in_progress "
+                "or cracked -- staff included. Staff can release a mission (unclaimed) "
+                "or void it (expired), but cannot award a crack on anyone's behalf."
+            ),
+            tests=status_test(
+                400,
+                'pm.test("Refused on the status field", function () {',
+                '    pm.expect(pm.response.json()).to.have.property("status");',
+                "});",
+            ),
+        ),
+        req(
             "Alice patches points on her own mission (403)  [required case 4]",
             "PATCH",
             "/api/missions/{{mission_id}}/",
@@ -738,7 +796,8 @@ violations = folder(
             "PATCH",
             "/api/missions/{{mission_id}}/",
             token="alice_token",
-            body={"hostel": 2},
+            body={"hostel": "{{other_hostel_id}}"},
+            description="Tries to move alice's mission (and its points) to bob's hostel.",
             tests=status_test(403),
         ),
         req(
@@ -767,6 +826,25 @@ violations = folder(
                 'pm.test("Rejected as expired", function () {',
                 "    const body = pm.response.json();",
                 '    pm.expect(body.code).to.eql("mission_expired");',
+                "});",
+            ),
+        ),
+        req(
+            "Alice cracks her overdue mission (400)",
+            "PATCH",
+            "/api/missions/{{overdue_mission_id}}/status/",
+            token="alice_token",
+            body={"status": "cracked"},
+            description=(
+                "Alice is the claimant and the payload is status-only, so ownership and "
+                "the field whitelist both pass. The row still says 'in_progress', but "
+                "the deadline has passed: the API checks the deadline, not the stored "
+                "status."
+            ),
+            tests=status_test(
+                400,
+                'pm.test("Rejected as expired", function () {',
+                '    pm.expect(pm.response.json().code).to.eql("mission_expired");',
                 "});",
             ),
         ),
@@ -928,12 +1006,15 @@ environment = {
         {"key": "mission_id", "value": "", "type": "default", "enabled": True},
         {"key": "claimed_mission_id", "value": "", "type": "default", "enabled": True},
         {"key": "expired_mission_id", "value": "", "type": "default", "enabled": True},
+        {"key": "overdue_mission_id", "value": "", "type": "default", "enabled": True},
         {"key": "throttle_mission_id", "value": "", "type": "default", "enabled": True},
         {"key": "hostel_id", "value": "", "type": "default", "enabled": True},
         {"key": "participant_id", "value": "", "type": "default", "enabled": True},
         {"key": "created_mission_id", "value": "", "type": "default", "enabled": True},
         # Working variables the collection sets for itself.
         {"key": "other_participant_id", "value": "", "type": "default", "enabled": True},
+        {"key": "bob_participant_id", "value": "", "type": "default", "enabled": True},
+        {"key": "other_hostel_id", "value": "", "type": "default", "enabled": True},
         {"key": "alice_handle", "value": "", "type": "default", "enabled": True},
         {"key": "next_handle", "value": "", "type": "default", "enabled": True},
         {"key": "new_username", "value": "", "type": "default", "enabled": True},

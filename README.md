@@ -37,7 +37,7 @@ just let the collection discover them itself (it does).
 ### Verify the build
 
 ```bash
-python manage.py test                                  # 167 tests
+python manage.py test                                  # 180 tests
 python manage.py check                                 # 0 issues
 python manage.py spectacular --validate --fail-on-warn # 0 warnings
 ```
@@ -48,7 +48,7 @@ python manage.py spectacular --validate --fail-on-warn # 0 warnings
 
 | Who | Username | Password | Role |
 |---|---|---|---|
-| Staff | `staff` | `staffpass123` | `is_staff`, full mission CRUD, no participant profile |
+| Staff | `staff` | `staffpass123` | `is_staff`, full mission CRUD (cannot claim or crack), no participant profile |
 | Alice | `alice` | `alicepass123` | Participant, hostel A |
 | Bob | `bob` | `bobpass123` | Participant, hostel B |
 
@@ -75,7 +75,7 @@ All under `/api/`.
 | GET | `/missions/` | authenticated | Filter, search, order, paginate |
 | POST | `/missions/` | staff | |
 | GET | `/missions/{id}/` | authenticated | |
-| PUT/PATCH | `/missions/{id}/` | staff, or claimant for `status` only | |
+| PUT/PATCH | `/missions/{id}/` | staff, or claimant for `status` only | Staff: core fields, and `status` only to `unclaimed` / `expired` |
 | DELETE | `/missions/{id}/` | staff | |
 | POST | `/missions/{id}/claim/` | participant | **Throttled 5/min per user** |
 | PATCH | `/missions/{id}/status/` | claimant | `{"status": "cracked"}` |
@@ -84,6 +84,7 @@ All under `/api/`.
 | GET | `/docs/` | anyone | Swagger UI |
 
 Hostels are read-only over the API — they are seeded data, managed in the Django admin.
+Participants are created through `/auth/register/`.
 
 ### Query parameters on `/api/missions/`
 
@@ -145,6 +146,11 @@ def effective_status(self):
 
 A `cracked` mission stays cracked past its deadline and keeps its points.
 
+A mission staff have marked `expired` is expired too, whatever its deadline says.
+Either way, claiming it or changing its status returns
+`400 {"code": "mission_expired"}` — never `409`, which is reserved for missions that
+are in progress or cracked.
+
 ### Claiming is race-safe
 
 `POST /api/missions/{id}/claim/` ends in a single conditional `UPDATE` whose `WHERE`
@@ -164,13 +170,27 @@ and receives `409`. This needs no row locks and works on SQLite.
 
 ### Ownership is enforced field by field
 
-Only the claimant may change a mission's status, and only the `status` field. The
+Among participants, only the claimant may change a mission's status, and only the
+`status` field. The
 permission layer checks ownership *first*, then the payload keys — so a claimant who
 sends `{"status": "cracked", "points": 9999}` gets `403` and **nothing is written**,
 rather than having the allowed half applied.
 
-`PATCH /api/missions/{id}/` and `PATCH /api/missions/{id}/status/` call the same
-service function, so the two routes cannot drift apart.
+**Only the claimant can move a mission into `in_progress` or `cracked` — staff
+included.** Staff administer missions: they edit the core fields, and may set `status`
+to `unclaimed` (releasing the claim, which also drops any points it scored) or
+`expired` (voiding it). A staff `in_progress` or `cracked` gets `400`, so nobody can
+award a crack on a claimant's behalf, before or after the deadline. Re-sending the
+*current* status, as a GET-then-PUT round trip does, is not a change: it is dropped
+from the write. That includes an overdue mission's reported `expired`, so extending
+its deadline in the same PUT revives it instead of voiding it — expiry is never
+stored by accident. Staff edits also write only the fields they send, so a claim or
+crack that lands while an edit is in flight is never written back over.
+
+For a claimant, `PATCH /api/missions/{id}/` and `PATCH /api/missions/{id}/status/`
+call the same service function, so the two routes cannot drift apart. (A staff
+account's generic PATCH is an admin edit, so a staff member who also competes changes
+status through `/status/`.)
 
 ### Status codes
 
@@ -182,6 +202,10 @@ service function, so the two routes cannot drift apart.
 | Expired mission, invalid transition, validation error | `400` |
 | Mission already claimed or cracked | `409` |
 | Claim rate limit exceeded | `429` (with `Retry-After`) |
+
+Staff get `400`, not `403`, for a status only the claimant may set: staff *may* edit
+a mission, so the value is a validation error on the field. A participant who is not
+the claimant may not edit the mission at all, hence `403`.
 
 Competition errors carry a stable machine-readable code so clients need not
 string-match:
@@ -204,7 +228,8 @@ Codes in use: `mission_expired`, `mission_unavailable`, `invalid_transition`,
 3. Make sure the server is running and `seed_demo` has been run.
 4. Open the Collection Runner and run the whole collection **in folder order**.
 
-Expected result: **47 requests, 85 assertions, 0 failures.**
+Expected result: **50 requests, 91 assertions, 0 failures.** (newman counts the six
+`pm.sendRequest` calls made by pre-request scripts as requests too.)
 
 Folder 0 captures every token and id into the environment, so no request hardcodes a
 URL or an id — the collection works unchanged after a re-seed that renumbers the
@@ -223,6 +248,16 @@ primary keys.
 | 7 | Sixth claim within a minute | 8. Rate limiting | `429` |
 
 They are tagged `[required case N]` in the request names.
+
+Beyond the seven, folder 6 also shows:
+
+| Case | Code |
+|---|---|
+| Staff tries to mark bob's mission `cracked` | `400` — only the claimant can |
+| Alice tries to crack her own mission after its deadline (`OVERTIME`, stored `in_progress`) | `400 mission_expired` |
+| Alice smuggles `points` alongside `status` | `403` — nothing is written |
+| Alice tries to move her mission to bob's hostel | `403` |
+| Claim with no token | `401` |
 
 ### Re-running the collection
 
@@ -251,18 +286,19 @@ python manage.py test              # everything
 python manage.py test competition.tests.test_claims   # one module
 ```
 
-167 tests across eight modules:
+180 tests across nine modules:
 
 | Module | Covers |
 |---|---|
 | `test_models.py` | Derived scores, derived expiry, model invariants, hostel seeding |
 | `test_leaderboard.py` | Ranking and ties, response shapes, registration, N+1 query count |
 | `test_claims.py` | Claiming, availability, **races**, who may claim |
-| `test_permissions.py` | Ownership, field-level restrictions, staff CRUD, profile edits |
+| `test_permissions.py` | Ownership, field-level restrictions, staff CRUD and staff status limits, profile edits |
 | `test_deadlines.py` | Deadline boundaries on every write path, nothing persisted |
 | `test_filters.py` | Effective-status filtering, search, ordering, pagination |
 | `test_throttling.py` | The 5/min claim limit and everything it must *not* affect |
 | `test_docs.py` | Schema completeness, security scheme, documented failure modes |
+| `test_seed.py` | The demo states the Postman collection depends on; safe re-runs and `--reset` |
 
 Notes on how they are written:
 
@@ -278,23 +314,25 @@ Notes on how they are written:
 
 ## Deliverables checklist
 
+The task sheet's own list (section 10), word for word, and where each item lives.
+
 | # | Deliverable | Where |
 |---|---|---|
-| 1 | Hostel, Participant, Mission models with correct relations | `competition/models.py` |
-| 2 | 17 hostels seeded | `competition/constants.py`, migration `0002_seed_hostels` |
-| 3 | Leaderboard computed live by ORM aggregation, no stored score | `competition/managers.py`, `LeaderboardView` |
-| 4 | Custom DRF permission classes | `competition/permissions.py` |
-| 5 | Ownership enforced — only the claimant edits status | `MissionAccessPolicy`, `apply_status_change` |
-| 6 | Field-level edit restrictions | `MissionAccessPolicy.has_object_permission` |
-| 7 | Claim availability enforced | `claim_mission` in `competition/views.py` |
-| 8 | Race-safe claiming | Conditional `UPDATE` in `claim_mission`; `test_claims.py` |
-| 9 | Deadline enforcement on every write path | `Mission.effective_status`, `test_deadlines.py` |
-| 10 | Filtering by status, difficulty and hostel | `competition/filters.py` |
-| 11 | Search over codename and brief | `MissionViewSet.search_fields` |
-| 12 | Settings-driven pagination | `REST_FRAMEWORK["PAGE_SIZE"]`; nothing else mentions a page size |
-| 13 | Scoped throttle on claim only, returning 429 | `competition/throttles.py`, `test_throttling.py` |
-| 14 | Auto-generated docs at `/api/docs/` | `config/urls.py`, `@extend_schema` annotations |
-| 15 | Postman collection + environment covering success and failure | `postman/` |
+| 1 | Complete Django + Django REST Framework project | `manage.py`, `config/`, `competition/`; setup under [Quick start](#quick-start) |
+| 2 | Properly related Hostel, Participant and Mission data models | `competition/models.py`: Participant ↔ User one-to-one, Participant → Hostel, Mission → claimant Participant, Mission → Hostel (copied from the claimant). 17 hostels seeded by migration `0002_seed_hostels` |
+| 3 | DRF serializers for the related entities | `competition/serializers.py`: missions nest the claimant (handle + hostel) and the hostel; hostel detail nests its cracked missions |
+| 4 | Full Mission CRUD API | `MissionViewSet`: `GET`/`POST /api/missions/`, `GET`/`PUT`/`PATCH`/`DELETE /api/missions/{id}/` |
+| 5 | Hostel and Participant APIs | `HostelViewSet` (read-only, live scores), `ParticipantViewSet` (list, detail, `me`, edit, delete), `/api/auth/register/`, `/api/auth/token/` |
+| 6 | Computed leaderboard endpoint | `GET /api/leaderboard/`: `LeaderboardView` over `Hostel.objects.with_scores()` (`managers.py`); no score is stored |
+| 7 | Custom permission classes | `competition/permissions.py`: `IsStaff`, `IsParticipant`, `IsMissionClaimant`, `IsOwnerOrStaff`, `MissionAccessPolicy` |
+| 8 | Mission state validation | `claim_mission()` / `apply_status_change()` in `views.py` (availability, transitions, race-safe conditional `UPDATE`); `MissionSerializer.validate()` (only the claimant sets `in_progress`/`cracked`); `Mission.clean()` |
+| 9 | Deadline validation | `Mission.effective_status`, re-checked by both services and inside their conditional `UPDATE`s; `test_deadlines.py` |
+| 10 | Filtering, search and pagination | `competition/filters.py` (effective-status aware), `search_fields`, `REST_FRAMEWORK["PAGE_SIZE"]` (settings only) |
+| 11 | DRF throttling for mission claims | `ClaimRateThrottle` (`competition/throttles.py`): 5/min per user, on the claim action only, `429` with `Retry-After` |
+| 12 | Auto-generated API documentation at /api/docs/ | drf-spectacular: Swagger UI at `/api/docs/`, schema at `/api/schema/` |
+| 13 | Exported Postman collection as .json | `postman/golden_keyboard.postman_collection.json` |
+| 14 | Postman environment variables | `postman/golden_keyboard.postman_environment.json`; no request hardcodes a URL or an id |
+| 15 | Tests covering the major success and failure cases | `competition/tests/`: 180 tests in 9 modules (see [Tests](#tests)) |
 
 ---
 
@@ -312,7 +350,8 @@ your evaluator expects otherwise.
    `unclaimed` while the API reports `expired`.
 4. **Cracked missions keep their points** after the deadline passes.
 5. **`409` for already-claimed, `400` for expired.** Both bodies carry a `code`.
-6. **No unclaiming.** Not in the spec.
+6. **Participants cannot unclaim.** Not in the spec. (Staff can release a mission by
+   setting it back to `unclaimed`.)
 7. **Staff may create missions with past deadlines** (needed to demo expired cases).
    Staff cannot set `claimed_by` or `hostel` directly — those are read-only fields.
 8. **The leaderboard is public.** Everything else requires authentication.
@@ -323,6 +362,26 @@ your evaluator expects otherwise.
     how forbidden mission fields are handled, and it means a client that tries to
     switch hostels finds out instead of believing it worked.
     Test: `test_permissions.py::test_participant_cannot_change_their_own_hostel`.
+11. **Only the claimant moves a mission into `in_progress` or `cracked` — staff
+    included.** The task sheet says so outright. Staff may set `unclaimed` (release) or
+    `expired` (void); a staff `in_progress`/`cracked` returns `400`. Re-sending the
+    current status is accepted. This governs the API; the Django admin stays a trusted
+    repair surface. Tests: `test_permissions.py::StaffStatusRestrictionTests`.
+12. **Expired is always `400 mission_expired`**, whether the deadline passed or staff
+    stored `expired`. `409` is only for missions that are in progress or cracked.
+13. **A mission's hostel is fixed when it is claimed.** If staff later move a
+    participant to another hostel, the missions they already claimed — and the points
+    those earn — stay with the hostel they were claimed for.
+14. **Deleting a participant (staff only) keeps their missions.** The claimant becomes
+    empty; cracked missions keep scoring for their hostel, and in-progress ones stay
+    locked until staff reset them to `unclaimed` or their deadline passes.
+15. **Hostels are read-only over the API** (seeded data, managed in the admin), and
+    **participants are created only through `/api/auth/register/`.**
+16. **Staff edits write only the fields they send.** A claim or crack that lands while a
+    staff edit is in flight is never written back over.
+17. **A mission released while its claimant's crack is in flight answers `403`** — it
+    is no longer theirs — the same answer a request a moment later would get, rather
+    than a misleading "expired".
 
 ### ⚠️ Hostel names need confirming
 
@@ -367,7 +426,7 @@ competition/
     0002_seed_hostels.py
   management/commands/
     seed_demo.py
-  tests/               8 modules, 167 tests
+  tests/               9 modules, 180 tests
 postman/
   golden_keyboard.postman_collection.json
   golden_keyboard.postman_environment.json

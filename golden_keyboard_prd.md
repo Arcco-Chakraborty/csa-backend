@@ -20,6 +20,25 @@ Goals
 - Postman collection + environment (.json) demonstrating success and failure cases.
 - Automated tests for every rule below.
 
+Deliverables, as the problem statement lists them (section 10, verbatim). The README
+checklist maps each one to where it lives in the code:
+
+1. Complete Django + Django REST Framework project
+2. Properly related Hostel, Participant and Mission data models
+3. DRF serializers for the related entities
+4. Full Mission CRUD API
+5. Hostel and Participant APIs
+6. Computed leaderboard endpoint
+7. Custom permission classes
+8. Mission state validation
+9. Deadline validation
+10. Filtering, search and pagination
+11. DRF throttling for mission claims
+12. Auto-generated API documentation at /api/docs/
+13. Exported Postman collection as .json
+14. Postman environment variables
+15. Tests covering the major success and failure cases
+
 Non-goals
 
 - No frontend.
@@ -129,6 +148,11 @@ Model-level invariants (enforce in Mission.clean() and in serializers):
 - status == unclaimed requires claimed_by and hostel to be null.
 - hostel, when set, must equal claimed_by.hostel at the time of claim.
 
+Two consequences, both deliberate (section 12, decisions 12 and 13):
+
+- hostel is a snapshot taken at claim time. If staff later move a participant to another hostel, the missions they already claimed, and the points those earn, stay with the hostel they were claimed for. (Mission.clean() compares against the claimant's current hostel, so the admin flags such a mission; the API never calls clean() on it.)
+- claimed_by is SET_NULL, so deleting a participant (staff only) leaves their in_progress and cracked missions with no claimant. hostel is kept, so cracked points still count; an in_progress mission stays locked until staff reset it to unclaimed or its deadline passes.
+
 Why store hostel on Mission at all: the spec says missions must "keep track of which hostel that mission belongs to", and filtering by ?hostel=<id> is required. It is written only by the claim action, never by any client payload.
 
 ### 3.5 Effective status (deadline handling)
@@ -150,7 +174,8 @@ Rules:
 
 - A cracked mission stays cracked after its deadline and still scores.
 - An unclaimed or in_progress mission whose deadline has passed is treated as expired everywhere: API output, filtering, claiming, status changes.
-- The API never trusts the stored status alone. Every write path re-checks the deadline against timezone.now().
+- The API never trusts the stored status alone. Every path that can claim or crack a mission re-checks the deadline against timezone.now(). (Staff edits cannot move a mission into in_progress or cracked at all; see 6.3.)
+- A mission staff stored as expired is expired whatever its deadline says: claiming it or changing its status is 400 mission_expired.
 - Persisting "expired" to the DB is not required. Do not add a cron job.
 
 ### 3.6 Scores (derived only)
@@ -175,7 +200,7 @@ Hostel.objects = HostelQuerySet.as_manager(). No code anywhere increments or dec
 - Auth classes: TokenAuthentication and SessionAuthentication.
 - Default permission: IsAuthenticated.
 - Roles:
-  - Staff: user.is_staff == True. Full mission CRUD. Does not need a Participant profile.
+  - Staff: user.is_staff == True. Full mission CRUD. Does not need a Participant profile. Cannot move a mission into in_progress or cracked; only the claimant can (see 6.3).
   - Participant: authenticated user with a related Participant row.
   - An authenticated non-staff user without a Participant profile gets 403 on any participant action.
 
@@ -206,7 +231,7 @@ All under /api/. Error bodies use DRF's default {"detail": "..."} for permission
 | GET | /api/missions/ | authenticated | filter, search, paginate |
 | POST | /api/missions/ | staff | create |
 | GET | /api/missions/{id}/ | authenticated | |
-| PUT/PATCH | /api/missions/{id}/ | staff: core fields; claimant: status only | see 6.3 |
+| PUT/PATCH | /api/missions/{id}/ | staff: core fields, status only to unclaimed/expired; claimant: status only | see 6.3 |
 | DELETE | /api/missions/{id}/ | staff | |
 | POST | /api/missions/{id}/claim/ | participant | throttled 5/min per user |
 | PATCH | /api/missions/{id}/status/ | claimant | body: {"status": "cracked"} |
@@ -286,7 +311,7 @@ All 17 hostels appear, including zero-score ones. Ordering: score desc, then nam
   - claimed_by: ParticipantMiniSerializer, read_only.
   - hostel: HostelMiniSerializer, read_only.
   - is_expired: read-only boolean.
-  - Staff create/update validation: status on create must be unclaimed or expired (a staff user cannot create an in_progress or cracked mission with no claimant). If staff sets status back to unclaimed on an existing mission, clear claimed_by and hostel in the same save.
+  - Staff create/update validation: only the claimant can move a mission into in_progress or cracked (problem statement section 4), so staff may write status only as unclaimed or expired. Sending the status a mission already has -- as the API reports it (effective) or as stored -- is not a change and is dropped from the write, so a GET-then-PUT round trip works and never persists a derived expired. Anything else is 400 on the status field. On create this means a mission starts unclaimed or expired. If staff set status back to unclaimed on an existing mission, clear claimed_by and hostel in the same save. Staff updates write only the fields they send (save(update_fields=...)), so a claim or crack that lands mid-request is never written back over.
 - MissionStatusSerializer: single field status, choices limited to in_progress and cracked.
 - CrackedMissionSerializer: id, codename, points, difficulty, claimed_by (id, handle).
 - HostelDetailSerializer: id, name, score, cracked_count, cracked_missions (CrackedMissionSerializer, many, sourced from a Prefetch of missions filtered to status="cracked").
@@ -313,12 +338,12 @@ Use explicit permission_classes / get_permissions() per action. Do not rely on t
 
 ### 6.2 Claiming - POST /api/missions/{id}/claim/
 
-Order of checks:
+Order of checks (DRF runs authentication, then permissions, then throttles, then the view):
 
-1. Throttle (ClaimRateThrottle) - runs before everything; failed attempts count toward the limit.
-2. Authenticated + IsParticipant, else 403.
+1. Authenticated, else 401; IsParticipant, else 403. These run before the throttle, so they do not consume claim quota.
+2. Throttle (ClaimRateThrottle). Every attempt that gets this far counts toward the limit, including ones that then fail with 404, 400 or 409.
 3. Mission exists, else 404.
-4. If mission.is_past_deadline() and status is not cracked -> 400 {"detail": "Mission has expired.", "code": "mission_expired"}.
+4. If effective_status is expired (deadline passed and not cracked, or stored expired) -> 400 {"detail": "Mission has expired.", "code": "mission_expired"}.
 5. If effective status is not unclaimed -> 409 {"detail": "Mission is not available to claim.", "code": "mission_unavailable"}.
 6. Atomic conditional update (race-safe, works on SQLite):
 
@@ -352,19 +377,20 @@ Checks, in order:
 1. IsParticipant, else 403.
 2. IsMissionClaimant, else 403 {"detail": "You can only update missions you claimed."}.
 3. Payload keys subset of {"status"}, else 403.
-4. Deadline passed (and stored status is not cracked) -> 400 mission_expired.
+4. Effective status is expired (deadline passed and not cracked, or stored expired) -> 400 mission_expired.
 5. Allowed transitions for participants:
 
 | From (effective) | To | Result |
 |---|---|---|
+| any | unclaimed or expired | 400, field error on status (MissionStatusSerializer accepts only in_progress and cracked) |
 | in_progress | in_progress | 200, no-op |
 | in_progress | cracked | 200 |
-| cracked | anything | 400 "Cracked missions are final." |
-| any | unclaimed or expired | 400 invalid transition |
+| cracked | in_progress or cracked | 400 cracked_is_final "Cracked missions are final." |
+| expired | in_progress or cracked | 400 mission_expired |
 
-Use a conditional update for the cracked transition too (filter status="in_progress", deadline__gt=now) so a crack submitted at the deadline boundary cannot slip through.
+Use a conditional update for the cracked transition too (filter status="in_progress", deadline__gt=now) so a crack submitted at the deadline boundary cannot slip through. If it matches nothing, re-read the row: no longer the caller's (released or reassigned mid-flight) -> 403 as in step 2, the answer a moment-later request would get; cracked -> 400 cracked_is_final; otherwise -> 400 mission_expired.
 
-Staff PUT/PATCH on /api/missions/{id}/ may edit codename, brief, points, difficulty, deadline, and status (subject to the invariants in 3.4). Staff still cannot write hostel or claimed_by directly.
+Staff PUT/PATCH on /api/missions/{id}/ may edit codename, brief, points, difficulty and deadline. Staff may set status only to unclaimed (a release: claimed_by and hostel are cleared in the same save) or expired (a void). in_progress and cracked are claimant-only (problem statement section 4: "Only the participant who claimed a mission should be able to change its status to in_progress or cracked"), so staff get 400 for them, unless the value equals the mission's current status (a no-op, so GET-then-PUT round trips work). Staff still cannot write hostel or claimed_by directly. These rules govern the API; the Django admin remains a trusted repair surface. A staff account that is also a mission's claimant changes that mission's status through /status/.
 
 ### 6.4 Summary of HTTP codes
 
@@ -373,9 +399,11 @@ Staff PUT/PATCH on /api/missions/{id}/ may edit codename, brief, points, difficu
 | Not logged in | 401 |
 | Not staff / not participant / not claimant / forbidden field | 403 |
 | Mission not found | 404 |
-| Expired mission claim or status change, invalid transition, validation error | 400 |
+| Expired mission claim or status change (deadline passed, or stored expired), invalid transition, validation error (including staff setting in_progress or cracked) | 400 |
 | Mission already claimed / in progress / cracked | 409 |
 | Claim rate limit exceeded | 429 |
+
+Staff get 400, not 403, for a status only the claimant may set: staff may edit a mission, so the value is a validation error on the field. A participant who is not the claimant may not edit the mission at all, hence 403.
 
 ---
 
@@ -460,11 +488,12 @@ CACHES uses LocMemCache (explicit in settings). Tests call cache.clear() in setU
   - 1 mission already claimed by bob, in_progress (for "modify another's mission" and "claim already claimed").
   - 2 cracked missions, one per hostel, so the leaderboard is non-trivial.
   - 1 mission with stored status unclaimed but deadline in the past (the "expired but DB says unclaimed" case).
+  - 1 mission claimed by alice, stored in_progress, deadline in the past (the "status change after the deadline" case; codename OVERTIME).
 - Prints all tokens and key mission ids at the end.
 
 ### 10.2 Postman environment (golden_keyboard.postman_environment.json)
 
-Variables: base_url (http://127.0.0.1:8000), staff_token, alice_token, bob_token, mission_id, claimed_mission_id, expired_mission_id, throttle_mission_id, hostel_id, participant_id, created_mission_id.
+Variables: base_url (http://127.0.0.1:8000), staff_token, alice_token, bob_token, mission_id, claimed_mission_id, expired_mission_id, overdue_mission_id, throttle_mission_id, hostel_id, participant_id, created_mission_id. The collection also sets working variables for itself (for example other_hostel_id and bob_participant_id, so request bodies that try to write another hostel or claimant carry no literal ids).
 
 No hardcoded URLs or ids anywhere in the collection. Every request uses {{base_url}} and variables. Auth header: Authorization: Token {{alice_token}} etc.
 
@@ -475,6 +504,7 @@ Folders, run in order. Each request has a Tests script asserting the status code
 0. Setup
    - Get staff token (captures staff_token)
    - Get alice token, Get bob token
+   - Discover ids by querying: alice's profile (participant_id, hostel_id), a claimable mission, bob's mission, the expired mission, alice's overdue mission (overdue_mission_id)
    - Register new participant (201)
    - Register duplicate handle (400)
 1. Hostels
@@ -507,9 +537,12 @@ Folders, run in order. Each request has a Tests script asserting the status code
    - Leaderboard reflects alice's hostel score increase (200)
 6. Rule violations
    - Alice changes status of bob's mission (403)    <- required case 3
+   - Staff cracks bob's mission (400)               <- only the claimant may set in_progress/cracked
    - Alice patches points on her own mission (403)  <- required case 4
    - Alice patches hostel on her own mission (403)
+   - Alice smuggles points alongside status (403)
    - Alice claims expired mission (400)             <- required case 6
+   - Alice cracks her overdue mission (400)         <- status change after the deadline
    - Unauthenticated claim (401)
 7. Leaderboard
    - Get leaderboard (200, sorted desc, 17 entries)
@@ -538,6 +571,11 @@ Leaderboard
 - Ties share the same rank.
 - Anonymous access allowed.
 
+Read APIs and response shapes (problem statement section 2)
+
+- Hostel detail returns id, name, score, cracked_count and cracked_missions, and only cracked missions appear in it.
+- A claimed mission nests claimed_by (id, handle, hostel) and hostel instead of bare ids; an unclaimed one returns null for both.
+
 Claims
 
 - Participant claims available mission -> 200, status in_progress, claimed_by set, hostel equals participant's hostel.
@@ -545,6 +583,7 @@ Claims
 - Claim in_progress mission -> 409.
 - Claim cracked mission -> 409.
 - Claim stored-expired mission -> 400.
+- Claim a mission stored as expired whose deadline is still in the future -> 400 mission_expired, not 409.
 - Claim mission with stored status unclaimed but past deadline -> 400.
 - Staff user without participant profile claims -> 403.
 - Unauthenticated claim -> 401.
@@ -559,6 +598,14 @@ Permissions and editing
 - Participant creates mission -> 403; participant deletes mission -> 403.
 - Staff edits points -> 200.
 - Staff creates mission with status cracked and no claimant -> 400.
+- Staff moves a claimed mission to cracked, before or after its deadline -> 400, score unchanged.
+- Staff moves a cracked mission back to in_progress -> 400.
+- Staff PUT that re-sends the current status (in_progress or cracked) -> 200.
+- Staff marks a claimed mission expired -> 200.
+- Staff moves an unclaimed mission into in_progress or cracked -> 400.
+- A GET-then-PUT round trip of an overdue mission, with an extended deadline, keeps it in_progress (never stores expired); the claimant can then crack it.
+- A staff member who is also a mission's claimant cracks it through /status/; once the deadline has passed, no route lets them.
+- A staff edit does not undo a claim or a crack that landed mid-request (stale-instance test, no threads).
 - Cracked -> in_progress by claimant -> 400.
 - Participant sets status unclaimed or expired -> 400.
 - Participant cannot change own hostel via participant PATCH -> 403 or field ignored (pick one, test it).
@@ -566,6 +613,8 @@ Permissions and editing
 Deadlines
 
 - Status change on in_progress mission after deadline -> 400.
+- Status change on a mission staff stored as expired, deadline still in the future -> 400 mission_expired.
+- A mission released by staff while the claimant's crack is in flight -> 403, not mission_expired.
 - Use unittest.mock.patch on django.utils.timezone.now (or create missions with past deadlines) - no sleeps.
 
 Filtering, search, pagination
@@ -584,6 +633,12 @@ Throttling
 Docs
 
 - GET /api/docs/ -> 200; GET /api/schema/ -> 200 and contains /api/missions/{id}/claim/.
+- The status route's 400 documents both mission_expired and cracked_is_final.
+
+Seed
+
+- seed_demo produces each state the Postman collection depends on: a claimable mission, bob's live in_progress mission, a stored-unclaimed mission past its deadline, alice's in_progress mission past its deadline, cracked missions in two different hostels, and more missions than fit on one page.
+- Running it twice creates no duplicates; --reset clears missions it did not create.
 
 ---
 
@@ -600,6 +655,14 @@ Change these if your evaluator or seniors specify otherwise.
 7. Staff may create missions with past deadlines (needed to demo expired cases). Staff cannot set claimed_by or hostel directly.
 8. Leaderboard is public (AllowAny); everything else requires authentication.
 9. Difficulty values and the 17 hostel names come from the previous task and are not in this document. Fill them in constants.py before building.
+10. Only the claimant moves a mission into in_progress or cracked, staff included; problem statement section 4 says so outright. Staff may set unclaimed (release) or expired (void); re-sending the current status (as reported, or as stored) is a no-op and is dropped from the write. This governs the API; the Django admin stays a trusted repair surface.
+11. Expired is always 400 mission_expired, whether the deadline passed or staff stored expired. 409 is only for missions that are in progress or cracked.
+12. Mission.hostel is a snapshot taken at claim time. If staff later move a participant to another hostel, their claimed missions, and the points those earn, stay with the hostel they were claimed for.
+13. Deleting a participant (staff only) keeps their missions: claimed_by becomes null (SET_NULL), cracked missions keep scoring for their hostel, and in_progress ones stay locked until staff reset them or their deadline passes.
+14. Hostels are read-only over the API (seeded data, managed in the admin). Participants are created only through /api/auth/register/.
+15. The claim check order follows DRF: authentication and permissions run before the throttle, so a 401 or 403 does not consume claim quota; every attempt that reaches the throttle counts, including failures.
+16. Staff edits write only the fields they send, so a claim or crack that lands while an edit is in flight is never written back over.
+17. A mission released while its claimant's crack is in flight answers 403 (it is no longer theirs), the same answer a moment-later request gets.
 
 ---
 
@@ -639,7 +702,7 @@ Phase 7 - README
 
 ### Definition of done
 
-- All 15 deliverables in the problem statement map to something in this repo (checklist in README).
+- All 15 deliverables in the problem statement (listed verbatim in section 1) map to something in this repo (checklist in README).
 - `python manage.py test` all green.
 - `python manage.py spectacular --validate --fail-on-warn` clean.
 - /api/docs/ renders and Authorize with a token works.
@@ -658,3 +721,19 @@ Where the PRD lists a decision in section 12, implement it as written. At the en
 run the full test suite, spectacular validation, and the curl checks for the 7
 required Postman cases, and report the results.
 ```
+
+---
+
+## 14. Revisions
+
+2026-09-23: re-checked line by line against the problem statement (Backend Task 1 Sen.docx).
+
+- 1: listed the problem statement's 15 deliverables verbatim.
+- 3.4, 3.5: hostel snapshot and participant-deletion semantics; "every write path" narrowed to "every path that can claim or crack"; a stored expired counts as expired.
+- 4, 5.1, 5.3, 6.3, 6.4: staff can no longer move a mission into in_progress or cracked. The previous text allowed it, which contradicted problem statement section 4.
+- 6.2: check order corrected to DRF's real order (authentication, permissions, throttle); step 4 now tests effective status, so a stored-expired mission is 400, not 409.
+- 6.3: step 4 and the transition table cover stored expired.
+- 10.1 to 10.3: seed mission for "status change after the deadline" (OVERTIME), its environment variable, and new folder-6 requests.
+- 11: tests for all of the above, plus the response-shape and seed tests.
+- 12: decisions 10 to 15.
+- After an independent code review (same day): an echo of the reported status is a no-op, so a round trip never stores a derived expired (5.3); staff edits write only the fields they send (5.3, decision 16); a mid-flight release answers 403 (6.3, decision 17); the 6.3 table states exactly which body each refusal returns; 6.4 explains 400-for-staff versus 403-for-participants; tests added in 11.

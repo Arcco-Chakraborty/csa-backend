@@ -144,35 +144,61 @@ class MissionSerializer(serializers.ModelSerializer):
         return data
 
     def validate(self, attrs):
-        """Staff-side invariants from PRD 3.4.
+        """Staff-side status rule (task §4; PRD 5.3 and 6.3).
 
-        A staff user cannot conjure an ``in_progress``/``cracked`` mission that nobody
-        claimed, because they cannot set ``claimed_by`` at all.
+        Only a mission's claimant may move it into ``in_progress`` or ``cracked``, via
+        the claim and status routes, which also enforce the deadline. Staff may release
+        a mission (``unclaimed``) or void it (``expired``), but never award a crack or
+        reopen one.
+
+        Sending the status a mission already has -- as the API reports it, or as
+        stored -- is not a change and is dropped from the write. That keeps a
+        GET-then-PUT round trip working, and stops one from persisting a *derived*
+        ``expired``: an overdue mission reads ``expired``, and echoing that back with a
+        new deadline must leave it ``in_progress``, not void it.
+
+        This covers creation too: a new mission has no claimant, so it can only start
+        out ``unclaimed`` or ``expired``.
         """
-        instance = self.instance
-        new_status = attrs.get(
-            "status", instance.status if instance else Status.UNCLAIMED
-        )
-        claimant_id = instance.claimed_by_id if instance else None
+        submitted = attrs.get("status")
+        if submitted is None:
+            return attrs
 
-        if new_status in (Status.IN_PROGRESS, Status.CRACKED) and claimant_id is None:
+        instance = self.instance
+        if instance is not None and submitted in (instance.status, instance.effective_status):
+            del attrs["status"]
+            return attrs
+
+        if submitted in PARTICIPANT_WRITABLE_STATUSES:
             raise serializers.ValidationError(
                 {
                     "status": (
-                        f"Cannot set status to '{new_status}' on a mission with no "
-                        "claimant. A mission becomes claimed only through "
-                        "POST /api/missions/{id}/claim/."
+                        f"Only the mission's claimant can set status to '{submitted}', "
+                        "via POST /api/missions/{id}/claim/ or "
+                        "PATCH /api/missions/{id}/status/. Staff may set 'unclaimed' "
+                        "or 'expired'."
                     )
                 }
             )
         return attrs
 
     def update(self, instance, validated_data):
-        """Resetting a mission to ``unclaimed`` releases it in the same save."""
+        """Write only the fields this request sent.
+
+        The claim and status services change a mission with conditional UPDATEs, not
+        through this instance. Saving every column of the instance loaded when this
+        request began would write a claim or crack that landed in between back over.
+        Resetting to ``unclaimed`` releases the mission in the same save.
+        """
         if validated_data.get("status") == Status.UNCLAIMED:
-            instance.claimed_by = None
-            instance.hostel = None
-        return super().update(instance, validated_data)
+            validated_data["claimed_by"] = None
+            validated_data["hostel"] = None
+        for field, value in validated_data.items():
+            setattr(instance, field, value)
+        instance.save(update_fields=[*validated_data, "updated_at"])
+        # Report the row as it now stands, including anything that landed mid-request.
+        instance.refresh_from_db()
+        return instance
 
 
 class MissionStatusSerializer(serializers.Serializer):

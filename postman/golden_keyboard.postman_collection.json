@@ -247,7 +247,7 @@
           ]
         },
         {
-          "name": "Find a mission claimed by someone else (captures claimed_mission_id, throttle_mission_id)",
+          "name": "Find a mission claimed by someone else (captures claimed_mission_id, throttle_mission_id, other_hostel_id)",
           "request": {
             "method": "GET",
             "header": [
@@ -273,7 +273,7 @@
                 }
               ]
             },
-            "description": "The same mission doubles as the throttle target: claiming an already-claimed mission always fails, so it can be hammered without changing any state."
+            "description": "The same mission doubles as the throttle target: claiming an already-claimed mission always fails, so it can be hammered without changing any state. Its claimant and hostel (bob's) are captured too, so later requests can try to write them without hardcoding ids."
           },
           "event": [
             {
@@ -284,12 +284,19 @@
                   "pm.test(\"Status is 200\", function () {",
                   "    pm.response.to.have.status(200);",
                   "});",
-                  "const results = pm.response.json().results;",
-                  "pm.test(\"A mission claimed by bob exists\", function () {",
-                  "    pm.expect(results.length).to.be.above(0);",
+                  "const mine = Number(pm.environment.get(\"participant_id\"));",
+                  "const theirs = pm.response.json().results.find(function (m) {",
+                  "    return m.claimed_by && m.claimed_by.id !== mine;",
                   "});",
-                  "pm.environment.set(\"claimed_mission_id\", results[0].id);",
-                  "pm.environment.set(\"throttle_mission_id\", results[0].id);"
+                  "pm.test(\"A mission claimed by bob exists\", function () {",
+                  "    pm.expect(theirs).to.not.be.undefined;",
+                  "});",
+                  "if (theirs) {",
+                  "    pm.environment.set(\"claimed_mission_id\", theirs.id);",
+                  "    pm.environment.set(\"throttle_mission_id\", theirs.id);",
+                  "    pm.environment.set(\"bob_participant_id\", theirs.claimed_by.id);",
+                  "    pm.environment.set(\"other_hostel_id\", theirs.hostel.id);",
+                  "}"
                 ]
               }
             }
@@ -321,7 +328,8 @@
                   "value": "expired"
                 }
               ]
-            }
+            },
+            "description": "Picks the unclaimed one: its row still says 'unclaimed' and only the passed deadline makes it expired."
           },
           "event": [
             {
@@ -332,11 +340,68 @@
                   "pm.test(\"Status is 200\", function () {",
                   "    pm.response.to.have.status(200);",
                   "});",
-                  "const results = pm.response.json().results;",
-                  "pm.test(\"An expired mission exists\", function () {",
-                  "    pm.expect(results.length).to.be.above(0);",
+                  "const ghost = pm.response.json().results.find(function (m) {",
+                  "    return m.claimed_by === null;",
                   "});",
-                  "pm.environment.set(\"expired_mission_id\", results[0].id);"
+                  "pm.test(\"An unclaimed, expired mission exists\", function () {",
+                  "    pm.expect(ghost).to.not.be.undefined;",
+                  "});",
+                  "if (ghost) { pm.environment.set(\"expired_mission_id\", ghost.id); }"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Find alice's overdue mission (captures overdue_mission_id)",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Token {{alice_token}}"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/api/missions/?status=expired&hostel={{hostel_id}}",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "missions",
+                ""
+              ],
+              "query": [
+                {
+                  "key": "status",
+                  "value": "expired"
+                },
+                {
+                  "key": "hostel",
+                  "value": "{{hostel_id}}"
+                }
+              ]
+            },
+            "description": "Alice claimed this mission, but its deadline passed before she cracked it. The row still says 'in_progress'; the API reports it as expired."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"Status is 200\", function () {",
+                  "    pm.response.to.have.status(200);",
+                  "});",
+                  "const mine = Number(pm.environment.get(\"participant_id\"));",
+                  "const overdue = pm.response.json().results.find(function (m) {",
+                  "    return m.claimed_by && m.claimed_by.id === mine;",
+                  "});",
+                  "pm.test(\"Alice has an overdue mission\", function () {",
+                  "    pm.expect(overdue).to.not.be.undefined;",
+                  "});",
+                  "if (overdue) { pm.environment.set(\"overdue_mission_id\", overdue.id); }"
                 ]
               }
             }
@@ -1489,14 +1554,14 @@
             },
             "body": {
               "mode": "raw",
-              "raw": "{\n  \"hostel\": 99,\n  \"claimed_by\": 99,\n  \"points\": 99999\n}",
+              "raw": "{\n  \"hostel\": \"{{other_hostel_id}}\",\n  \"claimed_by\": \"{{bob_participant_id}}\",\n  \"points\": 99999\n}",
               "options": {
                 "raw": {
                   "language": "json"
                 }
               }
             },
-            "description": "The body deliberately contains hostel, claimed_by and points. All three must be ignored: the server copies the claimant's own hostel and leaves the points alone."
+            "description": "The body deliberately tries to credit bob and bob's hostel, and to inflate the points. All three must be ignored: the server copies the claimant's own hostel and leaves the points alone."
           },
           "event": [
             {
@@ -1723,6 +1788,60 @@
           ]
         },
         {
+          "name": "Staff cracks bob's mission (400)",
+          "request": {
+            "method": "PATCH",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Token {{staff_token}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/api/missions/{{claimed_mission_id}}/",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "missions",
+                "{{claimed_mission_id}}",
+                ""
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"status\": \"cracked\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "description": "Only the participant who claimed a mission may move it to in_progress or cracked -- staff included. Staff can release a mission (unclaimed) or void it (expired), but cannot award a crack on anyone's behalf."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"Status is 400\", function () {",
+                  "    pm.response.to.have.status(400);",
+                  "});",
+                  "pm.test(\"Refused on the status field\", function () {",
+                  "    pm.expect(pm.response.json()).to.have.property(\"status\");",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
           "name": "Alice patches points on her own mission (403)  [required case 4]",
           "request": {
             "method": "PATCH",
@@ -1803,13 +1922,14 @@
             },
             "body": {
               "mode": "raw",
-              "raw": "{\n  \"hostel\": 2\n}",
+              "raw": "{\n  \"hostel\": \"{{other_hostel_id}}\"\n}",
               "options": {
                 "raw": {
                   "language": "json"
                 }
               }
-            }
+            },
+            "description": "Tries to move alice's mission (and its points) to bob's hostel."
           },
           "event": [
             {
@@ -1913,6 +2033,61 @@
                   "pm.test(\"Rejected as expired\", function () {",
                   "    const body = pm.response.json();",
                   "    pm.expect(body.code).to.eql(\"mission_expired\");",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Alice cracks her overdue mission (400)",
+          "request": {
+            "method": "PATCH",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Token {{alice_token}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/api/missions/{{overdue_mission_id}}/status/",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "missions",
+                "{{overdue_mission_id}}",
+                "status",
+                ""
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"status\": \"cracked\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "description": "Alice is the claimant and the payload is status-only, so ownership and the field whitelist both pass. The row still says 'in_progress', but the deadline has passed: the API checks the deadline, not the stored status."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"Status is 400\", function () {",
+                  "    pm.response.to.have.status(400);",
+                  "});",
+                  "pm.test(\"Rejected as expired\", function () {",
+                  "    pm.expect(pm.response.json().code).to.eql(\"mission_expired\");",
                   "});"
                 ]
               }
